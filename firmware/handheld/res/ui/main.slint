@@ -12,6 +12,7 @@ import { Global, ScreenId, Backend } from "common.slint";
 import { PowerMenu } from "components/power_menu.slint";
 import { Notification } from "components/notification.slint";
 import { SetupScreen } from "screens/setup.slint";
+import { FusionPixelFullCoverage } from "fusion_pixel_full_coverage.slint";
 
 export { ScreenId, Backend }
 
@@ -41,8 +42,11 @@ export component MainWindow inherits Window {
     }
 
     background: Global.ui-transparent ? transparent : #E8E8E8;
-    default-font-family: "Ark Pixel 12px Prop latin";
+    default-font-family: "Fusion Pixel 12px Prop zh_hans";
     default-font-size: 12px;
+
+    // Keep the full Fusion Pixel Unicode cmap in the pre-rendered MCU font.
+    FusionPixelFullCoverage {}
 
     init => {
         Global.window-height = root.height;

@@ -80,6 +80,12 @@ pub const FIRMWARE_VERSION: FirmwareVersion = {
         major: parse(env!("CARGO_PKG_VERSION_MAJOR").as_bytes()) as u8,
         minor: parse(env!("CARGO_PKG_VERSION_MINOR").as_bytes()) as u8,
         patch: parse(env!("CARGO_PKG_VERSION_PATCH").as_bytes()) as u8,
-        pre: 0,
+        // The update protocol only has one byte for pre-release information.
+        // Keep official releases at zero and mark custom/pre-release builds as one.
+        pre: if env!("CARGO_PKG_VERSION_PRE").is_empty() {
+            0
+        } else {
+            1
+        },
     }
 };

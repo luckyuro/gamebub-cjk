@@ -25,6 +25,11 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_FLASHMODE_QIO=y
 
+# Keep custom builds distinguishable from the official v1.0.1 image in the
+# ESP-IDF application descriptor as well as in the Rust/UI version string.
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="1.0.1-fusionpixel.1"
+
 # Enable USB MSC and CDC support
 CONFIG_TINYUSB=y
 CONFIG_TINYUSB_MSC_ENABLED=y
