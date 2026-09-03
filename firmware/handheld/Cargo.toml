@@ -1,6 +1,6 @@
 [package]
 name = "handheld"
-version = "1.0.2"
+version = "1.0.2-fusionpixel.1"
 authors = ["Eli Lipsitz <eli.lipsitz@gmail.com>"]
 edition = "2021"
 resolver = "2"
@@ -79,6 +79,7 @@ arrayvec = { version = "0.7.8", features = ["serde"] }
 [build-dependencies]
 embuild = "0.33.0"
 slint-build = "~1.12.1"
+regex = "1.13.1"
 
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/esp_tinyusb", version = "^2.0.1" }
