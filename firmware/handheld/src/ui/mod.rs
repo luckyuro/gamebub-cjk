@@ -17,6 +17,7 @@ use ::slint::{
 
 use crate::device::{Device, DisplayMode};
 use crate::input::{self, InputManager};
+use crate::rom_list::RomListPage;
 use crate::worker;
 pub use state::notifications::Notification;
 
@@ -50,7 +51,7 @@ pub enum Message {
     /// ROM loading progress
     RomLoadingProgress(f32),
     /// ROM select file list
-    RomSelectFiles(Vec<(String, bool)>),
+    RomSelectFiles(RomListPage),
     /// ROM select error
     RomSelectError(String),
     /// Enter the error screen, and show the given error

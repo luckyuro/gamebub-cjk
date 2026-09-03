@@ -9,7 +9,12 @@ use super::super::slint::Backend;
 use super::super::slint::FileIcon;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
-use crate::{device::Device, kvs, worker};
+use crate::{
+    device::Device,
+    kvs,
+    rom_list::{RomListFocus, RomListPage, RomListPageRequest},
+    worker,
+};
 
 use super::UiState;
 
@@ -26,10 +31,30 @@ impl UiState {
             let mut state = state_.borrow_mut();
             let root = state.root.unwrap();
             let backend = root.global::<Backend>();
-            let list = backend.get_rom_select_list();
-            if let Some(data) = list.row_data(index as usize) {
-                let path = state.rom_select_directory.join(data.name.as_str());
-                state.rom_select_handle_select(path, data.name.as_str())
+            let data = backend.get_rom_select_list().row_data(index as usize);
+            if let Some(data) = data {
+                match data.icon {
+                    FileIcon::PreviousPage => {
+                        if let Some(cursor) = state.rom_select_page_first.clone() {
+                            state.rom_select_load_page(RomListPageRequest::Before(cursor));
+                        }
+                        false
+                    }
+                    FileIcon::NextPage => {
+                        if let Some(cursor) = state.rom_select_page_last.clone() {
+                            state.rom_select_load_page(RomListPageRequest::After(cursor));
+                        }
+                        false
+                    }
+                    FileIcon::Folder | FileIcon::Blank => {
+                        let path = state.rom_select_directory.join(data.name.as_str());
+                        state.rom_select_handle_select(
+                            path,
+                            data.name.as_str(),
+                            data.icon == FileIcon::Folder,
+                        )
+                    }
+                }
             } else {
                 false
             }
@@ -38,7 +63,7 @@ impl UiState {
         let state_ = state.clone();
         backend.on_rom_select_up(move || {
             let mut state = state_.borrow_mut();
-            state.rom_select_handle_select(PathBuf::new(), "..")
+            state.rom_select_handle_select(PathBuf::new(), "..", true)
         });
 
         let state_ = state.clone();
@@ -48,39 +73,112 @@ impl UiState {
             let backend = root.global::<Backend>();
             let list = backend.get_rom_select_list();
             if let Some(data) = list.row_data(index as usize) {
-                let path = state.rom_select_directory.join(data.name.as_str());
-                kvs::keys::LAST_ROM_PATH.set(&path);
+                if matches!(data.icon, FileIcon::Folder | FileIcon::Blank) {
+                    let path = state.rom_select_directory.join(data.name.as_str());
+                    kvs::keys::LAST_ROM_PATH.set(&path);
+                }
             }
         });
     }
 
-    pub fn rom_select_update_list(&mut self, mut files: Vec<(String, bool)>) {
+    pub(super) fn rom_select_load_saved_page(&mut self) {
+        let request = kvs::keys::LAST_ROM_PATH
+            .get()
+            .and_then(|path| path.file_name().map(|name| name.to_owned()))
+            .and_then(|name| name.to_str().map(str::to_owned))
+            .filter(|name| name != "..")
+            .map(RomListPageRequest::ForName)
+            .unwrap_or(RomListPageRequest::First);
+        self.rom_select_load_page(request);
+    }
+
+    fn rom_select_load_page(&mut self, page: RomListPageRequest) {
+        let path = self.rom_select_directory.clone();
+        self.rom_select_page_first = None;
+        self.rom_select_page_last = None;
+        let root = self.root.unwrap();
+        let backend = root.global::<Backend>();
+        // Drop the previous page before the worker allocates its replacement.
+        backend.set_rom_select_list(ModelRc::default());
+        backend.set_rom_select_index(-1);
+        backend.set_rom_select_progress(0.0);
+        backend.set_rom_select_is_loading(true);
+
+        worker::send(worker::Message::ListRoms { path, page });
+    }
+
+    pub fn rom_select_update_list(&mut self, page: RomListPage) {
+        let RomListPage {
+            entries,
+            has_previous,
+            has_next,
+            focus,
+        } = page;
+        self.rom_select_page_first = entries.first().cloned();
+        self.rom_select_page_last = entries.last().cloned();
+
         let path = &self.rom_select_directory;
+        let saved_name = kvs::keys::LAST_ROM_PATH
+            .get()
+            .and_then(|path| path.file_name().map(|name| name.to_owned()))
+            .and_then(|name| name.to_str().map(str::to_owned));
+        let mut selected_saved = None;
+        let mut files = Vec::with_capacity(
+            entries.len()
+                + usize::from(path != Path::new(BASE_DIR))
+                + usize::from(has_previous)
+                + usize::from(has_next),
+        );
+
         if path != Path::new(BASE_DIR) {
-            files.insert(0, ("..".to_string(), true));
+            if saved_name.as_deref() == Some("..") {
+                selected_saved = Some(files.len());
+            }
+            files.push(crate::ui::slint::FileListEntry {
+                name: "..".into(),
+                icon: FileIcon::Folder,
+            });
         }
 
-        // Determine initial selected file.
-        let last_path = kvs::keys::LAST_ROM_PATH.get();
-        let selected = last_path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|f| f.to_str())
-            .and_then(|filename| files.iter().position(|(f, _)| f == filename))
-            .unwrap_or(0);
-        let files = ModelRc::from(Rc::new(VecModel::from(
-            files
-                .into_iter()
-                .map(|(name, is_dir)| crate::ui::slint::FileListEntry {
-                    name: name.into(),
-                    icon: if is_dir {
-                        FileIcon::Folder
-                    } else {
-                        FileIcon::Blank
-                    },
-                })
-                .collect::<Vec<_>>(),
-        )));
+        if has_previous {
+            files.push(crate::ui::slint::FileListEntry {
+                name: "Previous page".into(),
+                icon: FileIcon::PreviousPage,
+            });
+        }
+
+        let first_entry_index = files.len();
+        let entry_count = entries.len();
+        for entry in entries {
+            if saved_name.as_deref() == Some(entry.name.as_str()) {
+                selected_saved = Some(files.len());
+            }
+            files.push(crate::ui::slint::FileListEntry {
+                name: entry.name.into(),
+                icon: if entry.is_dir {
+                    FileIcon::Folder
+                } else {
+                    FileIcon::Blank
+                },
+            });
+        }
+
+        if has_next {
+            files.push(crate::ui::slint::FileListEntry {
+                name: "Next page".into(),
+                icon: FileIcon::NextPage,
+            });
+        }
+
+        let first_entry = (entry_count > 0).then_some(first_entry_index);
+        let last_entry = first_entry.map(|index| index + entry_count - 1);
+        let selected = match focus {
+            RomListFocus::Saved => selected_saved.or(first_entry),
+            RomListFocus::First => first_entry,
+            RomListFocus::Last => last_entry,
+        }
+        .unwrap_or(0);
+        let files = ModelRc::from(Rc::new(VecModel::from(files)));
 
         let root = self.root.unwrap();
         let backend = root.global::<Backend>();
@@ -123,41 +221,34 @@ impl UiState {
     }
 
     /// Handle selection. Returns whether a loading screen should be displayed.
-    fn rom_select_handle_select(&mut self, path: PathBuf, filename: &str) -> bool {
-        let mut is_loading = true;
-        let mut enter_game = false;
+    fn rom_select_handle_select(&mut self, path: PathBuf, filename: &str, is_dir: bool) -> bool {
         if filename == ".." {
             if self.rom_select_directory == Path::new(BASE_DIR) {
                 log::warn!("No parent directory");
-                is_loading = false;
+                return false;
             } else {
                 kvs::keys::LAST_ROM_PATH.set(&self.rom_select_directory);
                 self.rom_select_directory.pop();
-                worker::send(worker::Message::ListRoms(self.rom_select_directory.clone()));
+                self.rom_select_load_saved_page();
             }
-        } else if path.is_dir() {
+        } else if is_dir {
             log::info!("Entering subdirectory {}", filename);
             self.rom_select_directory.push(filename);
             let last_path = self.rom_select_directory.join("..");
             kvs::keys::LAST_ROM_PATH.set(&last_path);
-            worker::send(worker::Message::ListRoms(self.rom_select_directory.clone()));
+            self.rom_select_load_saved_page();
         } else {
             log::info!("Selected ROM {}", path.display());
             kvs::keys::LAST_ROM_PATH.set(&path);
+            let root = self.root.unwrap();
+            let backend = root.global::<Backend>();
+            backend.set_rom_select_list(ModelRc::default());
+            backend.set_rom_select_progress(0.0);
+            backend.set_rom_select_is_loading(true);
             worker::send(worker::Message::RunRomFile(path));
-            enter_game = true;
+            return true;
         }
-        if is_loading {
-            self.root
-                .unwrap()
-                .global::<Backend>()
-                .set_rom_select_progress(0.0);
-            self.root
-                .unwrap()
-                .global::<Backend>()
-                .set_rom_select_is_loading(true);
-        }
-        enter_game
+        false
     }
 
     pub fn rom_select_set_error(&mut self, error: String) {

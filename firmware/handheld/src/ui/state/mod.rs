@@ -10,6 +10,7 @@ use slint::{ComponentHandle, Global, Timer, TimerMode, Weak};
 
 use crate::device::Device;
 use crate::kvs;
+use crate::rom_list::RomListEntry;
 
 use super::slint::{
     Backend, MainWindow, ScreenId, SettingDatetime, SettingEntry, SettingType, SettingValue,
@@ -31,6 +32,8 @@ pub struct UiState {
     notification_active: bool,
 
     rom_select_directory: PathBuf,
+    rom_select_page_first: Option<RomListEntry>,
+    rom_select_page_last: Option<RomListEntry>,
     rom_select_timer: Timer,
     settings: settings::SettingsState,
 }
@@ -50,6 +53,8 @@ impl UiState {
             notification_queue: VecDeque::new(),
             notification_active: false,
             rom_select_directory,
+            rom_select_page_first: None,
+            rom_select_page_last: None,
             rom_select_timer: Timer::default(),
             settings: settings::SettingsState::default(),
         };

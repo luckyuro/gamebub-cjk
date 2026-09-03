@@ -17,6 +17,7 @@ mod input;
 mod kvs;
 mod led;
 mod power;
+mod rom_list;
 pub mod ui;
 mod util;
 mod worker;

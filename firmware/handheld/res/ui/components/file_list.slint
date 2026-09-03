@@ -5,6 +5,8 @@ import { ListView } from "std-widgets.slint";
 export enum FileIcon {
     blank,
     folder,
+    previous-page,
+    next-page,
 }
 
 export struct FileListEntry {
@@ -20,6 +22,10 @@ component FileListItem {
     pure function iconToImage(icon: FileIcon) -> image {
         if (icon == FileIcon.folder) {
             Icons.folder
+        } else if (icon == FileIcon.previous-page) {
+            Icons.left-caret
+        } else if (icon == FileIcon.next-page) {
+            Icons.right-caret
         } else {
             Icons.empty
         }
