@@ -46,6 +46,10 @@ const FILE_BIOS_DMG: u16 = 3;
 
 #[derive(Debug, Error)]
 pub enum GameboyError {
+    #[error("unsupported ROM size code {0:#04x}")]
+    UnsupportedRomSize(u8),
+    #[error("IMU error: {0}")]
+    ImuError(#[from] crate::device::drivers::imu::Error),
     #[error("unsupported cartridge type {0}")]
     UnsupportedCartridgeType(u8),
     #[error("I/O error")]
@@ -84,7 +88,7 @@ impl Gameboy {
         let config = 0 | (((!is_dmg) as u32) << 0);
         device.fpga.write_u32(REG_EMU_CONFIG, config)?;
 
-        device.imu.disable_accel().unwrap();
+        device.imu.disable_accel()?;
 
         // Disable vblank IRQ
         device.fpga.disable_interrupt(fpga::Irq::ModuleVblank)?;
@@ -239,10 +243,13 @@ impl CoreHandler for Gameboy {
 
     fn on_before_file_load(&mut self, id: u16, file: &mut File) -> Result<(), String> {
         if id == FILE_ROM {
-            self.rom_file_size = file.metadata().map_err(|_| "I/O")?.len() as u32;
+            let size = file.metadata().map_err(|e| e.to_string())?.len();
+            if size > 8 * 1024 * 1024 { return Err("ROM exceeds 8 MiB".into()); }
+            self.rom_file_size = size as u32;
             let mut rom_header = [0u8; 0x150];
-            file.read(&mut rom_header).map_err(|_| "I/O")?;
+            file.read_exact(&mut rom_header).map_err(|_| "I/O")?;
             let rom_header = rom::RomHeader::parse(rom_header).map_err(|e| e.to_string())?;
+            if self.rom_file_size < rom_header.rom_size { return Err("Truncated ROM".into()); }
             file.seek(std::io::SeekFrom::Start(0)).map_err(|_| "I/O")?;
             self.rom_header = Some(rom_header);
         } else if id == FILE_SAVE {
@@ -261,7 +268,7 @@ impl CoreHandler for Gameboy {
                     let elapsed = device
                         .get_datetime()
                         .unix_timestamp()
-                        .saturating_sub_unsigned(rtc_timestamp);
+                        .saturating_sub_unsigned(rtc_timestamp).max(0);
                     rtc_state.advance(elapsed as u64);
                     log::info!(
                         "Loaded saved RTC state: {:?}, elapsed={}",
@@ -302,7 +309,7 @@ impl CoreHandler for Gameboy {
             let _ = device.fpga.write_u32(REG_EMU_CART_RAM_ADDR, 0);
             let _ = device
                 .fpga
-                .write_u32(REG_EMU_CART_RAM_MASK, rom_header.ram_size - 1);
+                .write_u32(REG_EMU_CART_RAM_MASK, rom_header.ram_size.saturating_sub(1));
 
             // If IMU is needed, enable vsync IRQ
             if rom_header.has_sensor {

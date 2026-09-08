@@ -1,0 +1,260 @@
+--- a/software_renderer/fonts.rs
++++ b/software_renderer/fonts.rs
+@@ -19,6 +19,8 @@
+ #[derive(derive_more::From, Clone)]
+ pub enum GlyphAlphaMap {
+     Static(&'static [u8]),
++    /// A static binary alpha map stored as one bit per pixel, most-significant bit first.
++    StaticBitPacked { data: &'static [u8], height: u16 },
+     Shared(Rc<[u8]>),
+ }
+
+--- a/software_renderer/fonts/vectorfont.rs
++++ b/software_renderer/fonts/vectorfont.rs
+@@ -23,7 +23,7 @@
+ impl clru::WeightScale<GlyphCacheKey, RenderableGlyph> for RenderableGlyphWeightScale {
+     fn weight(&self, _: &GlyphCacheKey, value: &RenderableGlyph) -> usize {
+         match &value.alpha_map {
+-            super::GlyphAlphaMap::Static(_) => 0,
++            super::GlyphAlphaMap::Static(_) | super::GlyphAlphaMap::StaticBitPacked { .. } => 0,
+             super::GlyphAlphaMap::Shared(data) => data.len(),
+         }
+     }
+--- a/software_renderer/fonts/pixelfont.rs
++++ b/software_renderer/fonts/pixelfont.rs
+@@ -55,12 +55,23 @@
+         let x = Fixed::from_fraction(src_x.0, delta.0);
+         let off_x = Fixed::<i32, 8>(-x.0 & 0xff);
+         let width = (Fixed::from_integer(bitmap_glyph.width as i32 - 1) - off_x) / delta + 1;
++        // The Game Bub full-Fusion-Pixel build stores binary alpha maps at one bit per
++        // pixel. Keep the flash-backed data packed while rendering so drawing text does
++        // not allocate one buffer per glyph occurrence.
++        let pixel_count = bitmap_glyph.width as usize * bitmap_glyph.height as usize;
++        if bitmap_glyph.data.len() != pixel_count.div_ceil(8) {
++            debug_assert_eq!(bitmap_glyph.data.len(), pixel_count.div_ceil(8));
++            return None;
++        }
+         Some(RenderableGlyph {
+             x,
+             y: h_plus_y - Fixed::from_integer(height),
+             width: PhysicalLength::new(width as i16),
+             height: PhysicalLength::new(height as i16),
+-            alpha_map: bitmap_glyph.data.as_slice().into(),
++            alpha_map: super::GlyphAlphaMap::StaticBitPacked {
++                data: bitmap_glyph.data.as_slice(),
++                height: bitmap_glyph.height as u16,
++            },
+             pixel_stride: bitmap_glyph.width as u16,
+             sdf: self.bitmap_font.sdf,
+         })
+--- a/software_renderer/target_pixel_buffer.rs
++++ b/software_renderer/target_pixel_buffer.rs
+@@ -20,6 +20,8 @@
+     pub width: u32,
+     /// The height of the texture in pixels.
+     pub height: u32,
++    /// Whether an alpha map stores one pixel per bit instead of one byte per pixel.
++    pub(super) bitpacked_alpha: bool,
+ }
+
+ impl<'a> TextureData<'a> {
+@@ -30,8 +32,26 @@
+         size: IntSize,
+     ) -> Self {
+         let (width, height) = (size.width, size.height);
+-        Self { data, pixel_format, byte_stride, width, height }
++        Self { data, pixel_format, byte_stride, width, height, bitpacked_alpha: false }
+     }
++
++    pub(super) fn new_bitpacked_alpha(
++        data: &'a [u8],
++        pixel_stride: usize,
++        size: IntSize,
++    ) -> Self {
++        let (width, height) = (size.width, size.height);
++        Self {
++            data,
++            pixel_format: TexturePixelFormat::AlphaMap,
++            // For packed alpha maps this stores the stride in pixels. Consumers check
++            // bitpacked_alpha before interpreting it.
++            byte_stride: pixel_stride,
++            width,
++            height,
++            bitpacked_alpha: true,
++        }
++    }
+ }
+
+ pub(super) enum TextureDataContainer {
+--- a/software_renderer/scene.rs
++++ b/software_renderer/scene.rs
+@@ -288,11 +288,17 @@
+     /// number of pixels between two lines in the source
+     pub pixel_stride: u16,
+
++    /// Exact source dimensions when the alpha map stores one pixel per bit.
++    pub bitpacked_alpha_size: Option<PhysicalSize>,
++
+     pub extra: SceneTextureExtra,
+ }
+
+ impl<'a> SceneTexture<'a> {
+     pub fn source_size(&self) -> PhysicalSize {
++        if let Some(size) = self.bitpacked_alpha_size {
++            return size;
++        }
+         let mut len = self.data.len();
+         if self.format == TexturePixelFormat::SignedDistanceField {
+             len -= 1;
+@@ -315,11 +321,19 @@
+     ) -> Option<(Self, PhysicalRect)> {
+         let (extra, geometry) = SceneTextureExtra::from_target_texture(texture, clip)?;
+         let source = texture.source();
++        let bitpacked_alpha_size = source.bitpacked_alpha.then(|| {
++            PhysicalSize::new(source.width as _, source.height as _)
++        });
+         Some((
+             Self {
+                 data: source.data,
+-                pixel_stride: (source.byte_stride / source.pixel_format.bpp()) as u16,
++                pixel_stride: if source.bitpacked_alpha {
++                    source.byte_stride as u16
++                } else {
++                    (source.byte_stride / source.pixel_format.bpp()) as u16
++                },
+                 format: source.pixel_format,
++                bitpacked_alpha_size,
+                 extra,
+             },
+             geometry,
+@@ -443,12 +457,14 @@
+                 data: &b.as_bytes()[start * 3..end * 3],
+                 pixel_stride: stride as u16,
+                 format: TexturePixelFormat::Rgb,
++                bitpacked_alpha_size: None,
+                 extra: self.extra,
+             },
+             SharedBufferData::SharedImage(SharedImageBuffer::RGBA8(b)) => SceneTexture {
+                 data: &b.as_bytes()[start * 4..end * 4],
+                 pixel_stride: stride as u16,
+                 format: TexturePixelFormat::Rgba,
++                bitpacked_alpha_size: None,
+                 extra: self.extra,
+             },
+             SharedBufferData::SharedImage(SharedImageBuffer::RGBA8Premultiplied(b)) => {
+@@ -456,6 +472,7 @@
+                     data: &b.as_bytes()[start * 4..end * 4],
+                     pixel_stride: stride as u16,
+                     format: TexturePixelFormat::RgbaPremultiplied,
++                    bitpacked_alpha_size: None,
+                     extra: self.extra,
+                 }
+             }
+@@ -463,6 +480,7 @@
+                 data: &data[start..end],
+                 pixel_stride: *width,
+                 format: TexturePixelFormat::AlphaMap,
++                bitpacked_alpha_size: None,
+                 extra: self.extra,
+             },
+         }
+--- a/software_renderer.rs
++++ b/software_renderer.rs
+@@ -1500,7 +1500,14 @@
+                 self.vectors.textures.push(SceneTexture {
+                     data: texture_data.data,
+                     format: texture_data.pixel_format,
+-                    pixel_stride,
++                    pixel_stride: if texture_data.bitpacked_alpha {
++                        texture_data.byte_stride as u16
++                    } else {
++                        pixel_stride
++                    },
++                    bitpacked_alpha_size: texture_data.bitpacked_alpha.then(|| {
++                        PhysicalSize::new(texture_data.width as _, texture_data.height as _)
++                    }),
+                     extra,
+                 });
+                 self.items.push(SceneItem {
+@@ -1898,6 +1905,7 @@
+                                         data,
+                                         pixel_stride,
+                                         format: TexturePixelFormat::SignedDistanceField,
++                                        bitpacked_alpha_size: None,
+                                         extra: SceneTextureExtra {
+                                             colorize: color,
+                                             // color already is mixed with global alpha
+@@ -1925,6 +1933,15 @@
+                                     ),
+                                 )
+                             }
++                            fonts::GlyphAlphaMap::StaticBitPacked { data, height } => {
++                                target_pixel_buffer::TextureDataContainer::Static(
++                                    target_pixel_buffer::TextureData::new_bitpacked_alpha(
++                                        data,
++                                        glyph.pixel_stride as usize,
++                                        euclid::size2(glyph.pixel_stride, *height).cast(),
++                                    ),
++                                )
++                            }
+                             fonts::GlyphAlphaMap::Shared(data) => {
+                                 let source_rect = euclid::rect(0, 0, glyph.width.0, glyph.height.0);
+                                 target_pixel_buffer::TextureDataContainer::Shared {
+--- a/software_renderer/draw_functions.rs
++++ b/software_renderer/draw_functions.rs
+@@ -27,8 +27,10 @@
+         data,
+         format,
+         pixel_stride,
++        bitpacked_alpha_size,
+         extra: super::SceneTextureExtra { colorize, alpha, rotation, dx, dy, off_x, off_y },
+     } = *texture;
++    let bitpacked_alpha = bitpacked_alpha_size.is_some();
+
+     let source_size = texture.source_size().cast::<i32>();
+     let len = line_buffer.len();
+@@ -85,6 +87,7 @@
+                 &mut line_buffer[begin..end],
+                 format,
+                 data,
++                bitpacked_alpha,
+                 alpha,
+                 colorize,
+                 (pixel_stride as usize, dy),
+@@ -151,6 +154,7 @@
+                 &mut line_buffer[begin..end],
+                 format,
+                 data,
++                bitpacked_alpha,
+                 alpha,
+                 colorize,
+                 (stride, dy),
+@@ -185,6 +189,7 @@
+         line_buffer: &mut [impl TargetPixel],
+         format: TexturePixelFormat,
+         data: &[u8],
++        bitpacked_alpha: bool,
+         alpha: u8,
+         color: Color,
+         (stride, delta): (usize, Fixed<i32, 8>),
+@@ -269,9 +274,18 @@
+             }
+             TexturePixelFormat::AlphaMap => {
+                 for pix in line_buffer {
+-                    let pos = pos(1).0;
++                    let pixel_index = pos(1).0;
++                    let source_alpha = if bitpacked_alpha {
++                        data.get(pixel_index / 8)
++                            .map(|byte| {
++                                if byte & (1 << (7 - pixel_index % 8)) != 0 { 255 } else { 0 }
++                            })
++                            .unwrap_or(0)
++                    } else {
++                        data[pixel_index]
++                    };
+                     let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+-                        ((data[pos] as u16 * alpha as u16) / 255) as u8,
++                        ((source_alpha as u16 * alpha as u16) / 255) as u8,
+                         color.red(),
+                         color.green(),
+                         color.blue(),

@@ -25,42 +25,70 @@ pub trait Bitstream {
     fn on_vblank_irq(&mut self);
 }
 
-pub fn program_fpga(path: &Path) {
+pub fn program_fpga(path: &Path) -> Result<(), String> {
     log::info!("Loading bitstream {}", path.display());
     led::LedController::set_behavior(led::LedBehavior::LOADING);
     let mut device = Device::lock();
     let display_mode = device.get_display_mode();
 
-    if let DisplayMode::Internal = display_mode {
-        // Avoid LCD artifacts during FPGA reprogram.
-        device.set_lcd_enabled(false);
-        // For some reason, we need to sleep for a short amount of time here
-        // (before doing FPGA program), otherwise the LCD won't properly sleep.
-        // 2 ms is sometimes sufficient, 5 ms is always sufficient, 10 ms seems to always work.
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let result = (|| {
+        if let DisplayMode::Internal = display_mode {
+            // Avoid LCD artifacts during FPGA reprogram.
+            device
+                .set_lcd_enabled(false)
+                .map_err(|error| format!("failed to put LCD to sleep: {error:#}"))?;
+            // For some reason, we need to sleep for a short amount of time here
+            // (before doing FPGA program), otherwise the LCD won't properly sleep.
+            // 2 ms is sometimes sufficient, 5 ms is always sufficient, 10 ms seems to always work.
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
-    let file = File::open(path).unwrap();
-    let mut bitstream: Box<dyn std::io::Read> = if path.extension() == Some(OsStr::new("hs")) {
-        Box::new(heatshrink_decompress_stream(file))
-    } else if path.extension() == Some(OsStr::new("bit")) {
-        Box::new(BufReader::with_capacity(512, file))
-    } else {
-        panic!("Unsupported bitstream extension");
-    };
+        let file = File::open(path).map_err(|e| format!("failed to open bitstream {}: {e}", path.display()))?;
+        let mut bitstream: Box<dyn Read> = if path.extension() == Some(OsStr::new("hs")) {
+            Box::new(heatshrink_decompress_stream(file))
+        } else if path.extension() == Some(OsStr::new("bit")) {
+            Box::new(BufReader::with_capacity(512, file))
+        } else {
+            return Err("Unsupported bitstream extension".into());
+        };
+        let mut scratch = SCRATCH
+            .take()
+            .ok_or_else(|| "FPGA scratch buffer is already in use".to_string())?;
 
-    device
-        .fpga
-        .program(&mut bitstream, &mut SCRATCH.take().unwrap())
-        .unwrap();
-    device.fpga.set_display_mode(display_mode).unwrap();
-    device.fpga.enable_interrupt(fpga::Irq::Button).unwrap();
-    ui::send(ui::Message::InputState(device.get_input_state().unwrap()));
-    ui::send(ui::Message::Redraw);
+        device
+            .fpga
+            .program(&mut bitstream, &mut scratch)
+            .map_err(|error| format!("failed to program bitstream {}: {error}", path.display()))?;
+        device
+            .fpga
+            .set_display_mode(display_mode)
+            .map_err(|error| format!("failed to restore display mode: {error}"))?;
+        device
+            .fpga
+            .enable_interrupt(fpga::Irq::Button)
+            .map_err(|error| format!("failed to enable button interrupt: {error}"))?;
+        let input_state = device
+            .get_input_state()
+            .map_err(|()| "failed to read input state".to_string())?;
+        ui::send(ui::Message::InputState(input_state));
+        ui::send(ui::Message::Redraw);
+        Ok(())
+    })();
+
     led::LedController::set_behavior(led::LedBehavior::OFF);
 
-    if let DisplayMode::Internal = display_mode {
-        device.set_lcd_enabled(true);
+    let lcd_result = if let DisplayMode::Internal = display_mode {
+        device
+            .set_lcd_enabled(true)
+            .map_err(|error| format!("failed to wake LCD: {error:#}"))
+    } else {
+        Ok(())
+    };
+
+    match (result, lcd_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(lcd_error)) => Err(format!("{error}; {lcd_error}")),
     }
 }
 
@@ -69,9 +97,12 @@ pub fn initial_program_boot(device: &mut Device) -> anyhow::Result<()> {
     let file = crate::util::open_system_file("boot.bit.hs").context("Failed to read bitstream")?;
     let mut bitstream = heatshrink_decompress_stream(file);
 
+    let mut scratch = SCRATCH
+        .take()
+        .context("FPGA scratch buffer is already in use")?;
     device
         .fpga
-        .program(&mut bitstream, &mut SCRATCH.take().unwrap())
+        .program(&mut bitstream, &mut scratch)
         .context("Failed to program FPGA")
 }
 
@@ -83,6 +114,6 @@ fn heatshrink_decompress_stream(file: File) -> impl Read {
     embedded_io_adapters::std::ToStd::new(decoder)
 }
 
-pub fn program_boot() {
-    program_fpga(&crate::util::get_system_file_path("boot.bit.hs"));
+pub fn program_boot() -> Result<(), String> {
+    program_fpga(&crate::util::get_system_file_path("boot.bit.hs"))
 }

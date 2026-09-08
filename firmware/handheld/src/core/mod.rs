@@ -84,6 +84,8 @@ enum Stage {
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("Cannot open file {0}")]
     CannotOpenFile(String),
     #[error("Failed to load file {0}:\n{1}")]
@@ -289,7 +291,9 @@ impl CoreManager {
             .expect("DAC power");
 
         // And go back to the boot bitstream
-        bitstream::program_boot();
+        if let Err(error) = bitstream::program_boot() {
+            ui::send(ui::Message::CoreLoadError(error));
+        }
     }
 
     fn reset_state(&mut self) {
@@ -299,7 +303,9 @@ impl CoreManager {
         self.stage = Stage::Idle;
         self.selected_files.clear();
 
-        Device::lock().set_cart_power(false);
+        if let Err(error) = Device::lock().set_cart_power(false) {
+            log::error!("Failed to disable cartridge power: {error:#}");
+        }
     }
 
     fn poll_core_status(&mut self, expected: u32, timeout: Duration) -> Result<(), CoreError> {
@@ -452,7 +458,7 @@ impl CoreManager {
     }
 
     fn finish_loading_inner(&mut self) -> Result<(), CoreError> {
-        self.load_bitstream();
+        self.load_bitstream()?;
 
         // Wait for the core to be ready for setup.
         self.poll_core_status(command::STATUS_SETUP, SETUP_TIMEOUT)?;
@@ -461,7 +467,7 @@ impl CoreManager {
         if self.run_cartridge {
             let mut device = Device::lock();
             // Power turned off in reset_state.
-            device.set_cart_power(true);
+            device.set_cart_power(true).map_err(|e| Other(e.to_string()))?;
         }
 
         self.load_files()?;
@@ -490,13 +496,14 @@ impl CoreManager {
         Ok(())
     }
 
-    fn load_bitstream(&mut self) {
+    fn load_bitstream(&mut self) -> Result<(), CoreError> {
         assert!(self.stage == Stage::LoadBitstream);
 
-        bitstream::program_fpga(&self.core_info.as_ref().unwrap().bitstream);
+        bitstream::program_fpga(&self.core_info.as_ref().unwrap().bitstream).map_err(Other)?;
         if let Some(core_handler) = self.core_handler.get_mut() {
             core_handler.on_after_program();
         }
+        Ok(())
     }
 
     fn load_files(&mut self) -> Result<(), CoreError> {
@@ -505,7 +512,7 @@ impl CoreManager {
         let mut overall_total = 0u64;
         let mut last_progress_update = Instant::now();
 
-        let mut scratch = crate::bitstream::SCRATCH.take().expect("scratch buffer");
+        let mut scratch = crate::bitstream::SCRATCH.take().ok_or_else(|| Other("scratch buffer is already in use".into()))?;
 
         let core = self.core_info.as_ref().unwrap();
         let file_0_index = core.files.iter().position(|f| f.id == 0);
@@ -573,7 +580,7 @@ impl CoreManager {
                     .on_before_file_load(info.id, &mut file)
                     .map_err(|e| FailedLoadFile(info.label.to_string(), e))?;
             }
-            let file_size = file.metadata().unwrap().len();
+            let file_size = file.metadata()?.len();
             overall_total += file_size;
 
             if info.exact_size != 0 && file_size != (info.exact_size as u64) {
@@ -596,14 +603,17 @@ impl CoreManager {
             let mut handler_duration = Duration::ZERO;
             let mut transferred = 0;
             // TODO: maybe only bother with background I/O for a large file (> 256KB?)
-            let result = crate::util::background_io::iter_chunks(file, &mut scratch, |chunk| {
+            let result = crate::util::background_io::iter_chunks::<CoreError>(file, &mut scratch, |chunk| {
+                if u64::from(transferred) + chunk.len() as u64 > file_size {
+                    return Err(Other("File grew while reading".into()));
+                }
                 let transfer_start = Instant::now();
                 let max_clock = Some(Hertz(info.max_transfer_speed * 1000 * 2));
                 let command = SpiCommand::new(info.transfer_word_size);
                 Device::lock()
                     .fpga
                     .spi_write(max_clock, command, info.address + transferred, chunk)
-                    .unwrap();
+                    .map_err(|e| Other(e.to_string()))?;
                 transferred += chunk.len() as u32;
                 overall_transferred += chunk.len() as u64;
                 transfer_duration += transfer_start.elapsed();
@@ -621,9 +631,13 @@ impl CoreManager {
                     ui::send(ui::Message::CoreLoadProgress(progress));
                     last_progress_update = Instant::now();
                 }
+                Ok(())
             });
             let read_duration = result
-                .map_err(|_| FailedLoadFile(info.label.to_string(), "I/O error".to_string()))?;
+                .map_err(|e| FailedLoadFile(info.label.to_string(), e.to_string()))?;
+            if u64::from(transferred) != file_size {
+                return Err(FailedLoadFile(info.label.to_string(), "File size changed while reading".into()));
+            }
 
             let duration = start_time.elapsed();
             self.run_core_command(
@@ -687,7 +701,7 @@ impl CoreManager {
 
             let mut file = File::create(path)
                 .map_err(|_| FailedSaveFile(info.label.to_string(), "Open failed".to_string()))?;
-            let mut scratch = crate::bitstream::SCRATCH.take().expect("scratch buffer");
+            let mut scratch = crate::bitstream::SCRATCH.take().ok_or_else(|| Other("scratch buffer is already in use".into()))?;
             let buf = scratch.deref_mut();
             let mut address: u32 = info.address;
             let mut bytes_left = file_size as usize;

@@ -49,15 +49,24 @@ pub enum Message {
 /// Send a message to the worker threads.
 pub fn send(message: Message) {
     match SENDER.get() {
-        Some(sender) => sender.send(message).unwrap(),
+        Some(sender) => {
+            if let Err(mpsc::SendError(message)) = sender.send(message) {
+                log::error!(
+                    "Dropping worker message because the worker stopped: {:?}",
+                    message
+                );
+            }
+        }
         None => log::error!("Dropping worker message {:?}", message),
     }
 }
 
-/// Start the worker threadpool. Called once during system init. Panics if called twice.
-pub fn start() {
+/// Start the worker threadpool. Called once during system init.
+pub fn start() -> anyhow::Result<()> {
     let (sender, receiver) = mpsc::channel::<Message>();
-    SENDER.set(sender).expect("Worker already initialized");
+    SENDER
+        .set(sender)
+        .map_err(|_| anyhow::anyhow!("worker already initialized"))?;
 
     // TODO: look into reducing stack usage
     std::thread::Builder::new()
@@ -69,7 +78,8 @@ pub fn start() {
                 dispatch(message);
             }
         })
-        .unwrap();
+        .map_err(|error| anyhow::anyhow!("failed to start worker thread: {error}"))?;
+    Ok(())
 }
 
 static SENDER: OnceLock<mpsc::Sender<Message>> = OnceLock::new();
@@ -87,13 +97,23 @@ fn dispatch(message: Message) {
         Message::HeadphoneState(has_headphones) => {
             log::info!("Headphone detection: {}", has_headphones);
             let mut device = Device::lock();
-            device.dac.set_headphones_enabled(has_headphones).unwrap();
-            device.dac.set_speakers_enabled(!has_headphones).unwrap();
+            if let Err(error) = device.dac.set_headphones_enabled(has_headphones) {
+                log::error!("Failed to update headphone output: {error:?}");
+            }
+            if let Err(error) = device.dac.set_speakers_enabled(!has_headphones) {
+                log::error!("Failed to update speaker output: {error:?}");
+            }
         }
         Message::RunCartridge => {
             let cart_type = {
                 let mut device = Device::lock();
-                device.get_cart_switch()
+                match device.get_cart_switch() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        ui::send(ui::Message::CoreLoadError(format!("Failed to read cartridge switch: {error}")));
+                        return;
+                    }
+                }
             };
             log::info!("Cart switch: {}", cart_type);
 
@@ -116,14 +136,24 @@ fn dispatch(message: Message) {
             InputManager::lock().remove_all_gamepads();
             let mut device = Device::lock();
             device.docked = true;
-            device.change_display_mode(DisplayMode::External).unwrap();
+            if let Err(error) = device.change_display_mode(DisplayMode::External) {
+                log::error!("Failed to switch to external display: {error:#}");
+                ui::send(ui::Message::FatalError(format!(
+                    "Failed to switch to external display: {error:#}"
+                )));
+            }
         }
         Message::DockEnd => {
             ui::send(ui::Message::DockEnd);
             InputManager::lock().remove_all_gamepads();
             let mut device = Device::lock();
             device.docked = false;
-            device.change_display_mode(DisplayMode::Internal).unwrap();
+            if let Err(error) = device.change_display_mode(DisplayMode::Internal) {
+                log::error!("Failed to switch to internal display: {error:#}");
+                ui::send(ui::Message::FatalError(format!(
+                    "Failed to switch to internal display: {error:#}"
+                )));
+            }
         }
         Message::IdleTimerExpired => {
             // If the idle timer expires during setup, just power off.

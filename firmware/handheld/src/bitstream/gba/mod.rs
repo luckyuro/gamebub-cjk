@@ -327,9 +327,11 @@ impl CoreHandler for Gba {
 
     fn on_before_file_load(&mut self, id: u16, file: &mut File) -> Result<(), String> {
         if id == FILE_ROM {
-            self.rom_file_size = file.metadata().map_err(|_| "I/O")?.len() as u32;
+            let size = file.metadata().map_err(|e| e.to_string())?.len();
+            if size > 32 * 1024 * 1024 { return Err("ROM exceeds 32 MiB".into()); }
+            self.rom_file_size = size as u32;
             let mut rom_header = [0u8; ROM_HEADER_LENGTH];
-            file.read(&mut rom_header).map_err(|_| "I/O")?;
+            file.read_exact(&mut rom_header).map_err(|_| "I/O")?;
             file.seek(std::io::SeekFrom::Start(0)).map_err(|_| "I/O")?;
             let rom_header = RomHeader::parse(rom_header);
             self.emu_cart_config = game_db::lookup(&rom_header.game_code);
@@ -348,7 +350,7 @@ impl CoreHandler for Gba {
                     let elapsed = Device::lock()
                         .get_datetime()
                         .unix_timestamp()
-                        .saturating_sub_unsigned(rtc_timestamp);
+                        .saturating_sub_unsigned(rtc_timestamp).max(0);
 
                     match prev_state.to_offset_date_time() {
                         Ok(time) => {

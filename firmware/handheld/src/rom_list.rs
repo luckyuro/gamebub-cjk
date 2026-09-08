@@ -62,9 +62,14 @@ enum Selection {
 }
 
 fn is_supported_rom(name: &str) -> bool {
-    [".gb", ".gbc", ".gba"]
-        .iter()
-        .any(|extension| name.ends_with(extension))
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("gb")
+                || extension.eq_ignore_ascii_case("gbc")
+                || extension.eq_ignore_ascii_case("gba")
+        })
 }
 
 fn eligible_entry(entry: std::io::Result<DirEntry>) -> Option<RomListEntry> {
@@ -380,5 +385,13 @@ mod tests {
         .unwrap();
         assert_eq!(saved.entries[0].name, "rom-0130.gba");
         assert_eq!(saved.focus, RomListFocus::Saved);
+    }
+
+    #[test]
+    fn supported_extensions_are_case_insensitive() {
+        assert!(is_supported_rom("Pokemon.GBA"));
+        assert!(is_supported_rom("Pokemon.GbC"));
+        assert!(is_supported_rom("Pokemon.gb"));
+        assert!(!is_supported_rom("Pokemon.gba.txt"));
     }
 }

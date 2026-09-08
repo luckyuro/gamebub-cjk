@@ -80,8 +80,12 @@ pub enum Message {
 /// Send a message to the UI thread.
 pub fn send(message: Message) {
     match SENDER.get() {
-        Some(sender) => sender.send(message).unwrap(),
-        None => log::error!("Dropping UI message"),
+        Some(sender) => {
+            if let Err(mpsc::SendError(message)) = sender.send(message) {
+                log::error!("Dropping UI message because the UI stopped: {:?}", message);
+            }
+        }
+        None => log::error!("Dropping UI message {:?}", message),
     }
 }
 

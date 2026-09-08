@@ -112,9 +112,11 @@ pub struct LedController {
 }
 
 impl LedController {
-    pub fn start(led: LedDriver) {
+    pub fn start(led: LedDriver) -> anyhow::Result<()> {
         let (sender, receiver) = mpsc::channel::<LedBehavior>();
-        SENDER.set(sender).expect("LED already initialized");
+        SENDER
+            .set(sender)
+            .map_err(|_| anyhow::anyhow!("LED controller already initialized"))?;
 
         let mut controller = LedController {
             led,
@@ -125,17 +127,28 @@ impl LedController {
             .name("led".to_string())
             .stack_size(3 * 1024)
             .spawn(move || controller.run())
-            .unwrap();
+            .map_err(|error| anyhow::anyhow!("failed to start LED controller: {error}"))?;
+        Ok(())
     }
 
     pub fn set_behavior(behavior: LedBehavior) {
-        SENDER.get().unwrap().send(behavior).unwrap();
+        let Some(sender) = SENDER.get() else {
+            log::error!("Dropping LED behavior before controller initialization: {behavior:?}");
+            return;
+        };
+        if let Err(mpsc::SendError(behavior)) = sender.send(behavior) {
+            log::error!("Dropping LED behavior because the controller stopped: {behavior:?}");
+        }
     }
 
     fn set_color(&mut self, color: LedColor) {
-        self.led
+        if self
+            .led
             .set_duty_cycle_fraction(color.0 as u16, u8::MAX as u16)
-            .unwrap();
+            .is_err()
+        {
+            log::error!("Failed to update status LED");
+        }
     }
 
     #[must_use]
@@ -185,13 +198,23 @@ impl LedController {
         None
     }
 
-    fn run(&mut self) -> ! {
+    fn run(&mut self) {
         // Set higher than background threads.
         unsafe { esp_idf_svc::sys::vTaskPrioritySet(std::ptr::null_mut(), 10) };
 
         loop {
             let behavior = self.behavior.take();
-            let behavior = behavior.unwrap_or_else(|| self.receiver.recv().unwrap());
+            let behavior = match behavior {
+                Some(behavior) => behavior,
+                None => match self.receiver.recv() {
+                    Ok(behavior) => behavior,
+                    Err(error) => {
+                        log::error!("LED controller channel stopped: {error}");
+                        self.set_color(LedColor::off());
+                        return;
+                    }
+                },
+            };
             self.do_behavior(behavior);
         }
     }
