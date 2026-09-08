@@ -146,7 +146,9 @@ impl UiState {
             let timer = Timer::default();
             move |value| {
                 let brightness = (value as f32) / 100.0;
-                Device::lock().set_brightness(brightness);
+                if let Err(error) = Device::lock().set_brightness(brightness) {
+                    log::error!("Failed to set LCD brightness: {error:#}");
+                }
                 // Start the timer to hide the bar.
                 let state_ = state_.clone();
                 timer.start(

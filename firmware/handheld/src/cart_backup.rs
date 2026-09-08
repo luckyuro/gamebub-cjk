@@ -96,8 +96,10 @@ fn task(mut stream: CdcStream) {
 
         let new_cart_enable = device.fpga.read_u32(REG_CART_EN).unwrap() != 0;
         if cart_enabled != new_cart_enable {
-            device.set_cart_power(new_cart_enable);
-            cart_enabled = new_cart_enable;
+            match device.set_cart_power(new_cart_enable) {
+                Ok(()) => cart_enabled = new_cart_enable,
+                Err(error) => log::error!("Failed to update cartridge power: {error:#}"),
+            }
         }
         drop(device);
 

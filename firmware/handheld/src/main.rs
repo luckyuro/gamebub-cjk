@@ -76,10 +76,12 @@ fn main() -> anyhow::Result<()> {
     if device.sdcard.is_none() {
         log::warn!("Failed to mount SD card");
     }
-    device.set_brightness(kvs::keys::BRIGHTNESS.get().unwrap());
+    device
+        .set_brightness(kvs::keys::BRIGHTNESS.get().unwrap_or(0.5))
+        .context("Failed to set LCD brightness")?;
 
     // Setup workers.
-    worker::start();
+    worker::start()?;
     power::PowerManager::start(&mut device);
 
     // Initial programming FPGA

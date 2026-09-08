@@ -29,25 +29,30 @@ impl<'a> PwmBacklight<'a> {
         }
     }
 
-    pub fn init(&mut self) {
-        self.update();
+    pub fn init(&mut self) -> Result<(), esp_idf_svc::sys::EspError> {
+        self.update()
     }
 
     /// Set whether the backlight is enabled or disabled.
     ///
     /// Brightness percentage is maintained regardless.
-    pub fn set_enabled(&mut self, enabled: bool) {
+    pub fn set_enabled(&mut self, enabled: bool) -> Result<(), esp_idf_svc::sys::EspError> {
         self.enabled = enabled;
-        self.update();
+        self.update()
     }
 
     /// Set the brightness level (from 0 to 1)
-    pub fn set_brightness(&mut self, brightness: f32) {
-        self.brightness = brightness;
-        self.update();
+    pub fn set_brightness(&mut self, brightness: f32) -> Result<(), esp_idf_svc::sys::EspError> {
+        self.brightness = if brightness.is_finite() {
+            brightness.clamp(0.0, 1.0)
+        } else {
+            log::warn!("Ignoring non-finite LCD brightness");
+            0.5
+        };
+        self.update()
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> Result<(), esp_idf_svc::sys::EspError> {
         let duty = if self.enabled {
             // Brightness is perceived non-linearly: use a gamma correction for duty cycle.
             // Also, the minimum visible duty cycle (which we want 0.0 to map to)
@@ -64,6 +69,6 @@ impl<'a> PwmBacklight<'a> {
             duty,
             self.driver.get_max_duty(),
         );
-        self.driver.set_duty(duty).unwrap();
+        self.driver.set_duty(duty)
     }
 }

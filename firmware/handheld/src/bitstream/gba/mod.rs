@@ -28,6 +28,7 @@ mod save_type_detector;
 const SYSTEM_CLOCK_RATE: Hertz = Hertz(16 * 1024 * 1024);
 const ROM_HEADER_LENGTH: usize = 192;
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
+const MAX_ROM_SIZE: u64 = 32 * 1024 * 1024;
 
 const REG_EMU_CART_CONFIG: u32 = 0xE000_0000;
 const REG_EMU_CART_ROM_SIZE: u32 = 0xE000_0004;
@@ -42,10 +43,20 @@ const REG_STAT_CYCLES: u32 = 0xE000_1004;
 
 #[derive(Debug, Error)]
 pub enum GbaError {
-    #[error("I/O error")]
+    #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("FPGA error")]
+    #[error("FPGA error: {0}")]
     FpgaError(#[from] crate::device::drivers::fpga::Error),
+    #[error("IMU error: {0}")]
+    ImuError(#[from] crate::device::drivers::imu::Error),
+    #[error("ROM size {0} exceeds the 32 MiB cartridge address space")]
+    RomTooLarge(u64),
+    #[error("ROM size changed while reading: expected {expected} bytes, read {actual} bytes")]
+    RomSizeChanged { expected: u32, actual: u32 },
+    #[error("invalid GBA BIOS size {0}; expected 16384 bytes")]
+    InvalidBiosSize(u64),
+    #[error("scratch buffer is already in use")]
+    ScratchBufferUnavailable,
 }
 
 #[allow(unused)]
@@ -171,7 +182,7 @@ impl Gba {
     }
 
     fn get_bios_path() -> &'static str {
-        if kvs::keys::GBA_SKIP_BOOT_ANIM.get().unwrap() {
+        if kvs::keys::GBA_SKIP_BOOT_ANIM.get().unwrap_or(false) {
             "gba.bios-fast.bin"
         } else {
             "gba.bios.bin"
@@ -187,10 +198,12 @@ impl Gba {
         let mut bios_file = crate::util::open_system_file(bios_path)?;
         let file_len = bios_file.metadata()?.len();
         if file_len != 16 * 1024 {
-            log::warn!("Bios unexpected length: {}", file_len);
+            return Err(GbaError::InvalidBiosSize(file_len));
         }
-        let mut scratch = super::SCRATCH.take().expect("scratch buffer");
-        bios_file.read(&mut scratch)?;
+        let mut scratch = super::SCRATCH
+            .take()
+            .ok_or(GbaError::ScratchBufferUnavailable)?;
+        bios_file.read_exact(&mut scratch)?;
 
         let address = 0xE010_0000;
         let command = fpga::SpiCommand {
@@ -212,8 +225,8 @@ impl Gba {
     fn initialize(&mut self, device: &mut Device) -> Result<(), GbaError> {
         // Hold in reset
         device.fpga.write_u32(fpga::REG_CONTROL, 0b0000)?;
-        device.imu.disable_gyro().unwrap();
-        device.imu.disable_accel().unwrap();
+        device.imu.disable_gyro()?;
+        device.imu.disable_accel()?;
 
         // Load bios if needed
         self.load_bios(device)?;
@@ -221,7 +234,7 @@ impl Gba {
         // Other config
         device.fpga.write_u32(
             REG_GB_PLAYER,
-            kvs::keys::GBA_ENABLE_GBP.get().unwrap() as u32,
+            kvs::keys::GBA_ENABLE_GBP.get().unwrap_or(true) as u32,
         )?;
 
         // Disable Vblank IRQ
@@ -231,7 +244,7 @@ impl Gba {
         let correction: &ColorCorrection = {
             use color_correction::presets::*;
             let corrections = [&IDENTITY, &GBC_GBA, &GBA_AGS101, &NDS, &NDS_LITE, &NSO_GBA];
-            let setting = kvs::keys::GBA_COLOR_PROFILE.get().unwrap() as usize;
+            let setting = kvs::keys::GBA_COLOR_PROFILE.get().unwrap_or(1) as usize;
             corrections.get(setting).unwrap_or(&&IDENTITY)
         };
         // TODO: only configure if it has changed
@@ -265,9 +278,13 @@ impl Gba {
 
         // Load ROM
         let mut rom_file = File::open(rom_path)?;
-        let rom_file_size = rom_file.metadata()?.len() as u32;
+        let rom_file_size = rom_file.metadata()?.len();
+        if rom_file_size > MAX_ROM_SIZE {
+            return Err(GbaError::RomTooLarge(rom_file_size));
+        }
+        let rom_file_size = rom_file_size as u32;
         let mut rom_header = [0u8; ROM_HEADER_LENGTH];
-        rom_file.read(&mut rom_header)?;
+        rom_file.read_exact(&mut rom_header)?;
         rom_file.seek(std::io::SeekFrom::Start(0))?;
         let rom_header = RomHeader::parse(rom_header);
         log::info!("Loading rom: {}", rom_header);
@@ -275,16 +292,22 @@ impl Gba {
         let mut save_type_detector = SaveTypeDetector::new();
         let emu_cart_config = game_db::lookup(&rom_header.game_code);
 
-        let mut scratch = super::SCRATCH.take().expect("scratch buffer");
+        let mut scratch = super::SCRATCH
+            .take()
+            .ok_or(GbaError::ScratchBufferUnavailable)?;
         let mut total = 0u32;
         let mut last_progress_update = Instant::now();
         let start_time = Instant::now();
         let mut transfer_duration = Duration::ZERO;
         let mut detect_duration = Duration::ZERO;
-        crate::util::background_io::iter_chunks(rom_file, &mut scratch, |chunk| {
+        crate::util::background_io::iter_chunks::<GbaError>(rom_file, &mut scratch, |chunk| {
+            let new_total = u64::from(total) + chunk.len() as u64;
+            if new_total > MAX_ROM_SIZE {
+                return Err(GbaError::RomTooLarge(new_total));
+            }
             let transfer_start = Instant::now();
-            Device::lock().fpga.sdram_write(total, &chunk).unwrap();
-            total += chunk.len() as u32;
+            Device::lock().fpga.sdram_write(total, chunk)?;
+            total = new_total as u32;
             transfer_duration += transfer_start.elapsed();
 
             // Update UI progress bar.
@@ -296,10 +319,17 @@ impl Gba {
 
             let detect_start = Instant::now();
             if emu_cart_config.is_none() {
-                save_type_detector.process(&chunk);
+                save_type_detector.process(chunk);
             }
             detect_duration += detect_start.elapsed();
+            Ok(())
         })?;
+        if total != rom_file_size {
+            return Err(GbaError::RomSizeChanged {
+                expected: rom_file_size,
+                actual: total,
+            });
+        }
         ui::send(ui::Message::RomLoadingProgress(1.0));
         drop(scratch);
         let duration = start_time.elapsed();
@@ -326,7 +356,9 @@ impl Gba {
         let save_path = rom_path.with_extension("sav");
         let _ = crate::util::copy_file(&save_path, &save_path.with_extension("sav.bak"));
         let mut rtc_state: Option<RtcState> = None;
-        let mut scratch = super::SCRATCH.take().expect("scratch buffer");
+        let mut scratch = super::SCRATCH
+            .take()
+            .ok_or(GbaError::ScratchBufferUnavailable)?;
         let buf = &mut scratch;
         if let Ok(mut save_file) = File::open(save_path.as_path()) {
             log::info!("Loading save file");
@@ -351,7 +383,8 @@ impl Gba {
                     let elapsed = Device::lock()
                         .get_datetime()
                         .unix_timestamp()
-                        .saturating_sub_unsigned(rtc_timestamp);
+                        .saturating_sub_unsigned(rtc_timestamp)
+                        .max(0);
 
                     match prev_state.to_offset_date_time() {
                         Ok(time) => {
@@ -389,7 +422,9 @@ impl Gba {
         device
             .fpga
             .write_u32(REG_EMU_CART_CONFIG, emu_cart_config.as_config_u32())?;
-        device.fpga.write_u32(REG_EMU_CART_ROM_SIZE, rom_size - 1)?;
+        device
+            .fpga
+            .write_u32(REG_EMU_CART_ROM_SIZE, rom_size.saturating_sub(1))?;
 
         // Update RTC state
         let rtc_state = match rtc_state {
@@ -406,11 +441,11 @@ impl Gba {
         // If IMU is needed, enable vsync IRQ
         let mut need_vblank = false;
         if emu_cart_config.has_gyro {
-            device.imu.enable_gyro().unwrap();
+            device.imu.enable_gyro()?;
             need_vblank = true;
         }
         if emu_cart_config.has_accel {
-            device.imu.enable_accel().unwrap();
+            device.imu.enable_accel()?;
             need_vblank = true;
         }
         if need_vblank {
@@ -435,7 +470,9 @@ impl Gba {
         log::info!("Saving to: {}", save_path.display());
 
         let mut file = File::create(save_path)?;
-        let mut scratch = super::SCRATCH.take().expect("scratch buffer");
+        let mut scratch = super::SCRATCH
+            .take()
+            .ok_or(GbaError::ScratchBufferUnavailable)?;
         let mut address: u32 = 0;
         let mut bytes_left = self.save_size as usize;
 
@@ -444,7 +481,7 @@ impl Gba {
             let to_read = bytes_left.min(scratch.len());
             let data = &mut scratch[0..to_read];
             device.fpga.sram_read(address, data)?;
-            file.write(data)?;
+            file.write_all(data)?;
             address += to_read as u32;
             bytes_left -= to_read;
         }
@@ -453,8 +490,8 @@ impl Gba {
             let rtc_lo = device.fpga.read_u32(REG_RTC_LO)?;
             let rtc_hi = device.fpga.read_u32(REG_RTC_HI)?;
             let rtc_state = RtcState::from_fpga(rtc_lo, rtc_hi);
-            file.write(&rtc_state.to_disk())?;
-            file.write(&(device.get_datetime().unix_timestamp() as u64).to_le_bytes())?;
+            file.write_all(&rtc_state.to_disk())?;
+            file.write_all(&(device.get_datetime().unix_timestamp() as u64).to_le_bytes())?;
             log::info!("Wrote RTC state: {:?}", rtc_state);
         }
 
@@ -481,15 +518,23 @@ impl Bitstream for Gba {
         let mut device = Device::lock();
 
         // Enable/disable IMU as needed
-        if !paused && self.emu_cart_config.as_ref().map_or(false, |h| h.has_gyro) {
-            device.imu.enable_gyro().unwrap();
+        let gyro_result = if !paused && self.emu_cart_config.as_ref().map_or(false, |h| h.has_gyro)
+        {
+            device.imu.enable_gyro()
         } else {
-            device.imu.disable_gyro().unwrap();
+            device.imu.disable_gyro()
+        };
+        if let Err(error) = gyro_result {
+            log::error!("Failed to update gyroscope state: {error}");
         }
-        if !paused && self.emu_cart_config.as_ref().map_or(false, |h| h.has_accel) {
-            device.imu.enable_accel().unwrap();
-        } else {
-            device.imu.disable_accel().unwrap();
+        let accel_result =
+            if !paused && self.emu_cart_config.as_ref().map_or(false, |h| h.has_accel) {
+                device.imu.enable_accel()
+            } else {
+                device.imu.disable_accel()
+            };
+        if let Err(error) = accel_result {
+            log::error!("Failed to update accelerometer state: {error}");
         }
 
         device
@@ -522,27 +567,32 @@ impl Bitstream for Gba {
         // Read IMU
         let has_gyro = self.emu_cart_config.as_ref().map_or(false, |h| h.has_gyro);
         if has_gyro {
-            let gyro_sample = device.imu.read_gyro().unwrap();
-            let gyro_z = ((0x700 as f32) - gyro_sample.z) as u16;
-            device
-                .fpga
-                .write_u32(REG_IMU_GYRO_Z, gyro_z as u32)
-                .unwrap();
+            match device.imu.read_gyro() {
+                Ok(gyro_sample) => {
+                    let gyro_z = ((0x700 as f32) - gyro_sample.z) as u16;
+                    if let Err(error) = device.fpga.write_u32(REG_IMU_GYRO_Z, gyro_z as u32) {
+                        log::error!("Failed to update gyroscope sample: {error}");
+                    }
+                }
+                Err(error) => log::error!("Failed to read gyroscope: {error}"),
+            }
         }
         let has_accel = self.emu_cart_config.as_ref().map_or(false, |h| h.has_accel);
         if has_accel {
-            let accel_sample = device.imu.read_accel().unwrap();
-            // TODO: determine X and Y inversion
-            let accel_x = ((0x3A0 as f32) + ((0x1D0 as f32) * -accel_sample.x)) as u16;
-            let accel_y = ((0x3A0 as f32) + ((0x1D0 as f32) * -accel_sample.y)) as u16;
-            device
-                .fpga
-                .write_u32(REG_IMU_ACCEL_X, accel_x as u32)
-                .unwrap();
-            device
-                .fpga
-                .write_u32(REG_IMU_ACCEL_Y, accel_y as u32)
-                .unwrap();
+            match device.imu.read_accel() {
+                Ok(accel_sample) => {
+                    // TODO: determine X and Y inversion
+                    let accel_x = ((0x3A0 as f32) + ((0x1D0 as f32) * -accel_sample.x)) as u16;
+                    let accel_y = ((0x3A0 as f32) + ((0x1D0 as f32) * -accel_sample.y)) as u16;
+                    if let Err(error) = device.fpga.write_u32(REG_IMU_ACCEL_X, accel_x as u32) {
+                        log::error!("Failed to update accelerometer X: {error}");
+                    }
+                    if let Err(error) = device.fpga.write_u32(REG_IMU_ACCEL_Y, accel_y as u32) {
+                        log::error!("Failed to update accelerometer Y: {error}");
+                    }
+                }
+                Err(error) => log::error!("Failed to read accelerometer: {error}"),
+            }
         }
     }
 }

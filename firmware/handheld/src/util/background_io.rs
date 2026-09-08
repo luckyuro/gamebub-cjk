@@ -1,106 +1,42 @@
-use std::{
-    fs::File,
-    io::Read,
-    sync::{Condvar, Mutex},
-    time::{Duration, Instant},
-};
+use std::{fs::File, io::Read, time::Instant};
 
-/// Spawn a thread to read chunks from the file in background.
+/// Read a file in bounded chunks and pass each chunk to the consumer.
 ///
-/// The callback function will be called for each chunk, until either
-/// EOF or an Error.
-///
-/// Each chunk is at most half of the buffer size.
-pub fn iter_chunks(
+/// This intentionally runs on the caller's existing worker thread. Creating a temporary
+/// scoped thread for every ROM load requires another FreeRTOS stack allocation precisely
+/// when memory pressure is highest, and `Scope::spawn` cannot report allocation failure.
+pub fn iter_chunks<E>(
     mut file: File,
     buffer: &mut [u8],
-    mut f: impl FnMut(&[u8]),
-) -> Result<(), std::io::Error> {
-    pub enum ReaderResult<'a> {
-        Ok(&'a mut [u8], usize),
-        Eof,
-        Err(std::io::Error),
+    mut consume: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<std::io::Error>,
+{
+    if buffer.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ROM read buffer is empty",
+        )
+        .into());
     }
 
-    struct State<'a> {
-        result: Option<ReaderResult<'a>>,
-        free0: Option<&'a mut [u8]>,
-        free1: Option<&'a mut [u8]>,
-    }
-
-    let (buf0, buf1) = buffer.split_at_mut(buffer.len() / 2);
-    let state = Mutex::new(State {
-        result: None,
-        free0: Some(buf0),
-        free1: Some(buf1),
-    });
-    let condvar = Condvar::new();
-
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut duration = Duration::ZERO;
-
-            loop {
-                let buf = {
-                    // Wait for consumer to take result.
-                    let mut state = condvar
-                        .wait_while(state.lock().unwrap(), |x| x.result.is_some())
-                        .unwrap();
-                    // Take a free buffer.
-                    let buffer = state.free0.take();
-                    state.free0 = state.free1.take();
-                    buffer.unwrap()
-                };
-
-                // Read into the buffer.
-                let read_start = Instant::now();
-                let result = file.read(buf);
-                duration += read_start.elapsed();
-
-                // Send to consumer
-                let (out, exit) = match result {
-                    Ok(0) => (ReaderResult::Eof, true),
-                    Ok(n) => (ReaderResult::Ok(buf, n), false),
-                    Err(err) => (ReaderResult::Err(err), true),
-                };
-                state.lock().unwrap().result = Some(out);
-                condvar.notify_all();
-
-                if exit {
-                    log::info!("Read in {}ms", duration.as_millis() as u32);
-                    break;
-                }
+    let mut read_duration = std::time::Duration::ZERO;
+    loop {
+        let read_start = Instant::now();
+        let read = loop {
+            match file.read(buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => break result,
             }
-        });
+        };
+        read_duration += read_start.elapsed();
 
-        // Consumer (main thread)
-        loop {
-            // Wait for a result and take it (sync point)
-            let result = {
-                let mut state = condvar
-                    .wait_while(state.lock().unwrap(), |x| x.result.is_none())
-                    .unwrap();
-                state.result.take().unwrap()
-            };
-            condvar.notify_all();
-
-            // Process result.
-            let buf = match result {
-                ReaderResult::Ok(buf, n) => {
-                    f(&buf[0..n]);
-                    buf
-                }
-                ReaderResult::Eof => break Ok(()),
-                ReaderResult::Err(error) => break Err(error),
-            };
-
-            // Return the result buffer.
-            {
-                let mut state = state.lock().unwrap();
-                assert!(state.free1.is_none());
-                state.free1 = state.free0.take();
-                state.free0 = Some(buf);
-            }
+        let count = read.map_err(E::from)?;
+        if count == 0 {
+            log::info!("Read in {}ms", read_duration.as_millis() as u32);
+            return Ok(());
         }
-    })
+        consume(&buffer[..count])?;
+    }
 }

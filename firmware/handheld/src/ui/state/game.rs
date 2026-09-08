@@ -20,15 +20,20 @@ impl UiState {
 
         let state_ = state.clone();
         backend.on_game_set_paused(move |paused| {
-            let needs_persist = match bitstream::current().deref_mut() {
-                CurrentBitstream::None => false,
+            let result = match bitstream::current().deref_mut() {
+                CurrentBitstream::None => Ok(false),
                 CurrentBitstream::Gameboy(x) => {
-                    x.set_paused(paused).unwrap();
-                    x.needs_save_persist()
+                    x.set_paused(paused).map(|()| x.needs_save_persist())
                 }
-                CurrentBitstream::Gba(x) => {
-                    x.set_paused(paused).unwrap();
-                    x.needs_save_persist()
+                CurrentBitstream::Gba(x) => x.set_paused(paused).map(|()| x.needs_save_persist()),
+            };
+            let needs_persist = match result {
+                Ok(needs_persist) => needs_persist,
+                Err(error) => {
+                    let message = format!("Failed to update game pause state: {error}");
+                    log::error!("{message}");
+                    crate::ui::send(crate::ui::Message::FatalError(message));
+                    return;
                 }
             };
             if paused && needs_persist {
@@ -40,24 +45,33 @@ impl UiState {
             }
         });
 
-        backend.on_game_reset(move || match bitstream::current().deref_mut() {
-            CurrentBitstream::None => {}
-            CurrentBitstream::Gameboy(x) => x.reset().unwrap(),
-            CurrentBitstream::Gba(x) => x.reset().unwrap(),
+        backend.on_game_reset(move || {
+            let result = match bitstream::current().deref_mut() {
+                CurrentBitstream::None => Ok(()),
+                CurrentBitstream::Gameboy(x) => x.reset(),
+                CurrentBitstream::Gba(x) => x.reset(),
+            };
+            if let Err(error) = result {
+                let message = format!("Failed to reset game: {error}");
+                log::error!("{message}");
+                crate::ui::send(crate::ui::Message::FatalError(message));
+            }
         });
 
         let state_ = state.clone();
         backend.on_game_exit(move || {
             // Cut cartridge power (if enabled)
-            Device::lock().set_cart_power(false);
+            if let Err(error) = Device::lock().set_cart_power(false) {
+                log::error!("Failed to disable cartridge power: {error:#}");
+            }
             // Go back to the main menu
             let root = {
                 let state = state_.borrow_mut();
                 state.root.unwrap()
             };
             root.invoke_set_screen(ScreenId::MainMenu);
-            // And go back to the boot bitstream
-            bitstream::current().ensure_boot().unwrap();
+            // Reprogramming is blocking and can fail, so let the worker handle it.
+            worker::send(worker::Message::EnsureBootBitstream);
         });
     }
 

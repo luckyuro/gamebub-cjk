@@ -67,7 +67,13 @@ impl RomHeader {
             _ => return Err(GameboyError::UnsupportedCartridgeType(cartridge_type)),
         };
 
-        let rom_size = 32 * 1024 * (1 << header[0x148]);
+        let rom_size = match header[0x148] {
+            code @ 0x00..=0x08 => 32 * 1024 * (1u32 << code),
+            0x52 => 72 * 16 * 1024,
+            0x53 => 80 * 16 * 1024,
+            0x54 => 96 * 16 * 1024,
+            code => return Err(GameboyError::UnsupportedRomSize(code)),
+        };
         let ram_size = match header[0x149] {
             _ if mbc == MbcType::Mbc2 => 512,
             _ if mbc == MbcType::Mbc7 => 256,

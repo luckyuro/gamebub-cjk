@@ -281,7 +281,7 @@ impl Device<'_> {
             pin_led,
         )
         .context("status led")?;
-        crate::led::LedController::start(led);
+        crate::led::LedController::start(led)?;
         crate::led::LedController::set_behavior(crate::led::LedBehavior::LOADING);
 
         // TODO: see if we can avoid keeping FPGA power on all the time
@@ -335,7 +335,7 @@ impl Device<'_> {
             )
             .context("backlight led")?;
             let mut backlight = lcd_backlight::PwmBacklight::new(config, driver);
-            backlight.init();
+            backlight.init().context("initialize LCD backlight")?;
             backlight
         };
 
@@ -590,7 +590,7 @@ impl Device<'_> {
             .map_err(|_| ())
             .expect("Device already initialized");
 
-        Device::setup_interrupts();
+        Device::setup_interrupts()?;
 
         Ok(())
     }
@@ -693,18 +693,26 @@ impl Device<'_> {
     }
 
     /// Set whether the LCD is enabled or disabled.
-    pub fn set_lcd_enabled(&mut self, enabled: bool) {
-        self.lcd_backlight.set_enabled(enabled);
+    pub fn set_lcd_enabled(&mut self, enabled: bool) -> anyhow::Result<()> {
         if enabled {
-            self.lcd.exit_sleep().unwrap();
+            self.lcd.exit_sleep().context("LCD exit sleep")?;
+            self.lcd_backlight
+                .set_enabled(true)
+                .context("enable LCD backlight")?;
         } else {
-            self.lcd.enter_sleep().unwrap();
+            self.lcd_backlight
+                .set_enabled(false)
+                .context("disable LCD backlight")?;
+            self.lcd.enter_sleep().context("LCD enter sleep")?;
         }
+        Ok(())
     }
 
     /// Set the LCD brightness. The input is a float in the range [0.0, 1.0].
-    pub fn set_brightness(&mut self, brightness: f32) {
-        self.lcd_backlight.set_brightness(brightness);
+    pub fn set_brightness(&mut self, brightness: f32) -> anyhow::Result<()> {
+        self.lcd_backlight
+            .set_brightness(brightness)
+            .context("set LCD brightness")
     }
 
     /// Initialize the system time (after boot).
@@ -712,11 +720,15 @@ impl Device<'_> {
     /// Reads the time from the RTC. Sets a default time if no time is set.
     /// Then sets it in esp-idf (via libc settimeofday).
     fn init_datetime(&mut self) {
-        if self.rtc.read_datetime().unwrap().is_none() {
-            log::warn!("No date set, resetting");
-            self.rtc
-                .write_datetime(drivers::rtc::Datetime::default())
-                .unwrap();
+        match self.rtc.read_datetime() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                log::warn!("No date set, resetting");
+                if let Err(error) = self.rtc.write_datetime(drivers::rtc::Datetime::default()) {
+                    log::error!("Failed to initialize RTC: {error}");
+                }
+            }
+            Err(error) => log::error!("Failed to read RTC during startup: {error}"),
         }
         Device::set_esp_datetime(self.get_datetime());
     }
@@ -735,11 +747,18 @@ impl Device<'_> {
 
     /// Get the Device datetime.
     pub fn get_datetime(&mut self) -> time::OffsetDateTime {
-        let rtc_time = self.rtc.read_datetime().unwrap();
+        let rtc_time = match self.rtc.read_datetime() {
+            Ok(datetime) => datetime,
+            Err(error) => {
+                log::error!("Failed to read RTC: {error}");
+                None
+            }
+        };
         let ts = rtc_time
             .and_then(|dt| dt.as_timestamp())
             .unwrap_or(drivers::rtc::TIMESTAMP_2000);
-        time::OffsetDateTime::from_unix_timestamp(ts as i64).unwrap()
+        time::OffsetDateTime::from_unix_timestamp(ts as i64)
+            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
     }
 
     /// Set the Device datetime.
@@ -748,7 +767,9 @@ impl Device<'_> {
         Device::set_esp_datetime(dt);
         let ts = dt.unix_timestamp();
         let dt = drivers::rtc::Datetime::from_timestamp(ts as u64).unwrap_or_default();
-        self.rtc.write_datetime(dt).unwrap();
+        if let Err(error) = self.rtc.write_datetime(dt) {
+            log::error!("Failed to write RTC: {error}");
+        }
     }
 
     /// Update the display mode (internal vs external).
@@ -760,7 +781,9 @@ impl Device<'_> {
         log::info!("Display mode: {:?}", new_mode);
 
         if old_mode == DisplayMode::Internal {
-            self.lcd_backlight.set_enabled(false);
+            self.lcd_backlight
+                .set_enabled(false)
+                .context("disable LCD backlight")?;
             self.lcd.enter_sleep()?;
         }
 
@@ -773,7 +796,9 @@ impl Device<'_> {
 
             // Let LCD stabilize and refresh before turning on backlight. Measured empirically.
             std::thread::sleep(Duration::from_millis(200));
-            self.lcd_backlight.set_enabled(true);
+            self.lcd_backlight
+                .set_enabled(true)
+                .context("enable LCD backlight")?;
         }
 
         self.display_mode = new_mode;
@@ -793,18 +818,20 @@ impl Device<'_> {
     }
 
     /// Cartridge slot switch: true for pressed (Game Boy), false for not (GBA).
-    pub fn get_cart_switch(&mut self) -> bool {
+    pub fn get_cart_switch(&mut self) -> Result<bool, drivers::fpga::Error> {
         if let Some(pin) = self.pin_cart_switch.as_ref() {
-            pin.is_high()
+            Ok(pin.is_high())
         } else {
-            self.fpga.get_cartridge_slot_button().unwrap()
+            self.fpga.get_cartridge_slot_button()
         }
     }
 
-    pub fn set_cart_power(&mut self, enabled: bool) {
+    pub fn set_cart_power(&mut self, enabled: bool) -> anyhow::Result<()> {
         if let Some(pin) = self.pin_cart_power.as_mut() {
             log::info!("Cartridge power: {}", enabled);
-            pin.set_level(Level::from(enabled)).unwrap();
+            pin.set_level(Level::from(enabled))
+                .context("set cartridge power GPIO")?;
         }
+        Ok(())
     }
 }

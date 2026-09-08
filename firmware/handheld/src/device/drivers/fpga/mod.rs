@@ -54,6 +54,8 @@ pub enum Error {
     IncompatibleBitstream,
     #[error("spi error")]
     SpiError,
+    #[error("no configured SPI clock satisfies the requested maximum")]
+    NoSuitableSpi,
 }
 
 #[derive(Copy, Clone)]
@@ -131,13 +133,18 @@ where
         // Check that the bitstream was built for this hardware.
         let hardware_version = crate::hwinfo::get_hardware_version();
         let expected_id = 0xB010_0000 | (hardware_version.major as u32);
-        if header.user_id.is_none() || header.user_id == Some(0xFFFF_FFFF) {
-            log::info!("Bitstream has no UserID, assuming it is compatible");
-        } else if hardware_version.major == 0 || hardware_version.major == 255 {
-            log::info!("Hardware version major=0, skipping bitstream compatibility");
-        } else if header.user_id != Some(expected_id) {
-            log::error!("Incompatible bitstream, ID={:08X}", header.user_id.unwrap());
-            return Err(Error::IncompatibleBitstream);
+        match header.user_id {
+            None | Some(0xFFFF_FFFF) => {
+                log::info!("Bitstream has no UserID, assuming it is compatible")
+            }
+            Some(_) if hardware_version.major == 0 || hardware_version.major == 255 => {
+                log::info!("Hardware version major=0, skipping bitstream compatibility")
+            }
+            Some(user_id) if user_id != expected_id => {
+                log::error!("Incompatible bitstream, ID={user_id:08X}");
+                return Err(Error::IncompatibleBitstream);
+            }
+            Some(_) => {}
         }
 
         // After power-on-reset, INIT_B will be low for 10ms to 35ms (T_POR),
@@ -182,11 +189,15 @@ where
                 .map_err(|_| Error::ProgramError)?;
         }
 
+        let done = self.pin_done.is_high().map_err(|_| Error::PinError)?;
         log::info!(
             "Programmed FPGA, done={}, time={}",
-            self.pin_done.is_high().map_err(|_| Error::PinError)?,
+            done,
             start_time.elapsed().as_millis() as u32,
         );
+        if !done {
+            return Err(Error::ProgramError);
+        }
 
         Ok(())
     }
@@ -211,14 +222,11 @@ where
         max_clock: Option<Hertz>,
         operations: &mut [Operation],
     ) -> Result<(), Error> {
-        let driver = &mut self.data_spi.iter_mut().find(|(_, clock)| match max_clock {
+        let driver = self.data_spi.iter_mut().find(|(_, clock)| match max_clock {
             Some(max_clock) => *clock <= max_clock,
             None => true,
         });
-        let driver = match driver {
-            Some(driver) => driver,
-            None => panic!("No suitable spi for max clock {:?}", max_clock),
-        };
+        let driver = driver.ok_or(Error::NoSuitableSpi)?;
         driver
             .0
             .transaction(operations)

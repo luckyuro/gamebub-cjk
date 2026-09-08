@@ -49,15 +49,24 @@ pub enum Message {
 /// Send a message to the worker threads.
 pub fn send(message: Message) {
     match SENDER.get() {
-        Some(sender) => sender.send(message).unwrap(),
+        Some(sender) => {
+            if let Err(mpsc::SendError(message)) = sender.send(message) {
+                log::error!(
+                    "Dropping worker message because the worker stopped: {:?}",
+                    message
+                );
+            }
+        }
         None => log::error!("Dropping worker message {:?}", message),
     }
 }
 
-/// Start the worker threadpool. Called once during system init. Panics if called twice.
-pub fn start() {
+/// Start the worker threadpool. Called once during system init.
+pub fn start() -> anyhow::Result<()> {
     let (sender, receiver) = mpsc::channel::<Message>();
-    SENDER.set(sender).expect("Worker already initialized");
+    SENDER
+        .set(sender)
+        .map_err(|_| anyhow::anyhow!("worker already initialized"))?;
 
     // TODO: look into reducing stack usage
     std::thread::Builder::new()
@@ -69,10 +78,22 @@ pub fn start() {
                 dispatch(message);
             }
         })
-        .unwrap();
+        .map_err(|error| anyhow::anyhow!("failed to start worker thread: {error}"))?;
+    Ok(())
 }
 
 static SENDER: OnceLock<mpsc::Sender<Message>> = OnceLock::new();
+
+fn recover_to_boot(context: &str, error: impl std::fmt::Display) -> String {
+    let mut message = format!("{context}: {error}");
+    log::error!("{message}");
+    if let Err(recovery_error) = bitstream::current().ensure_boot() {
+        log::error!("Failed to restore boot bitstream: {recovery_error}");
+        message.push_str("\nFailed to restore the boot screen: ");
+        message.push_str(&recovery_error);
+    }
+    message
+}
 
 fn dispatch(message: Message) {
     match message {
@@ -87,72 +108,107 @@ fn dispatch(message: Message) {
         Message::HeadphoneState(has_headphones) => {
             log::info!("Headphone detection: {}", has_headphones);
             let mut device = Device::lock();
-            device.dac.set_headphones_enabled(has_headphones).unwrap();
-            device.dac.set_speakers_enabled(!has_headphones).unwrap();
+            if let Err(error) = device.dac.set_headphones_enabled(has_headphones) {
+                log::error!("Failed to update headphone output: {error:?}");
+            }
+            if let Err(error) = device.dac.set_speakers_enabled(!has_headphones) {
+                log::error!("Failed to update speaker output: {error:?}");
+            }
         }
         Message::RunCartridge => {
-            let cart_type = {
-                let mut device = Device::lock();
-                device.get_cart_switch()
-            };
-            log::info!("Cart switch: {}", cart_type);
-            if cart_type {
-                bitstream::current().ensure_gameboy().unwrap();
-            } else {
-                bitstream::current().ensure_gba().unwrap();
-            };
+            let result = (|| -> Result<(), String> {
+                let cart_type = Device::lock()
+                    .get_cart_switch()
+                    .map_err(|error| format!("failed to read cartridge switch: {error}"))?;
+                log::info!("Cart switch: {}", cart_type);
 
-            // Enable cartridge power after the bitstream is loaded.
-            {
-                let mut device = Device::lock();
-                device.set_cart_power(true);
+                let mut current = bitstream::current();
+                if cart_type {
+                    current.ensure_gameboy()?;
+                } else {
+                    current.ensure_gba()?;
+                }
+
+                // Enable cartridge power after the bitstream is loaded.
+                Device::lock()
+                    .set_cart_power(true)
+                    .map_err(|error| format!("failed to enable cartridge power: {error:#}"))?;
+
+                match current.deref_mut() {
+                    CurrentBitstream::None => Err("no cartridge bitstream is loaded".into()),
+                    CurrentBitstream::Gameboy(gameboy) => gameboy
+                        .set_physical_cartridge()
+                        .map_err(|error| error.to_string()),
+                    CurrentBitstream::Gba(gba) => gba
+                        .set_physical_cartridge()
+                        .map_err(|error| error.to_string()),
+                }
+            })();
+
+            match result {
+                Ok(()) => ui::send(ui::Message::EnterGame),
+                Err(error) => {
+                    if let Err(power_error) = Device::lock().set_cart_power(false) {
+                        log::error!("Failed to disable cartridge power: {power_error:#}");
+                    }
+                    let message = recover_to_boot("failed to start cartridge", error);
+                    ui::send(ui::Message::FatalError(message));
+                }
             }
-
-            match bitstream::current().deref_mut() {
-                CurrentBitstream::None => unreachable!(),
-                CurrentBitstream::Gameboy(x) => x.set_physical_cartridge().unwrap(),
-                CurrentBitstream::Gba(x) => x.set_physical_cartridge().unwrap(),
-            }
-
-            ui::send(ui::Message::EnterGame);
         }
         Message::SaveGame => {
-            // TODO handle error more gracefully
             match bitstream::current().deref_mut() {
                 CurrentBitstream::None => {}
-                CurrentBitstream::Gameboy(x) => x.persist_ram().unwrap(),
-                CurrentBitstream::Gba(x) => x.persist_save().unwrap(),
+                CurrentBitstream::Gameboy(gameboy) => {
+                    if let Err(error) = gameboy.persist_ram() {
+                        log::error!("Failed to save Game Boy cartridge RAM: {error}");
+                    }
+                }
+                CurrentBitstream::Gba(gba) => {
+                    if let Err(error) = gba.persist_save() {
+                        log::error!("Failed to save GBA cartridge RAM: {error}");
+                    }
+                }
             }
             ui::send(ui::Message::GameSaved);
         }
         Message::RunRomFile(path) => {
-            match path.extension().and_then(|e| e.to_str()) {
-                Some("gbc") | Some("gb") => bitstream::current().ensure_gameboy().unwrap(),
-                Some("gba") => bitstream::current().ensure_gba().unwrap(),
-                _ => {
-                    ui::send(ui::Message::RomSelectError(
-                        "unsupported ROM file type".into(),
-                    ));
-                    return;
+            crate::util::log_memory_checkpoint("before ROM load");
+            let extension = path.extension().and_then(|extension| extension.to_str());
+            let result = (|| -> Result<(), String> {
+                let mut current = bitstream::current();
+                match extension {
+                    Some(extension)
+                        if extension.eq_ignore_ascii_case("gb")
+                            || extension.eq_ignore_ascii_case("gbc") =>
+                    {
+                        current.ensure_gameboy()?
+                    }
+                    Some(extension) if extension.eq_ignore_ascii_case("gba") => {
+                        current.ensure_gba()?
+                    }
+                    _ => return Err("unsupported ROM file type".into()),
                 }
-            }
+                crate::util::log_memory_checkpoint("after game bitstream load");
 
-            let result: Result<(), String> = match bitstream::current().deref_mut() {
-                CurrentBitstream::None => Err("no bitstream".into()),
-                CurrentBitstream::Gameboy(x) => x
-                    .set_emulated_cartridge(path.as_path())
-                    .map_err(|e| e.to_string()),
-                CurrentBitstream::Gba(x) => x
-                    .set_emulated_cartridge(path.as_path())
-                    .map_err(|e| e.to_string()),
-            };
+                match current.deref_mut() {
+                    CurrentBitstream::None => Err("no game bitstream is loaded".into()),
+                    CurrentBitstream::Gameboy(gameboy) => gameboy
+                        .set_emulated_cartridge(path.as_path())
+                        .map_err(|error| error.to_string()),
+                    CurrentBitstream::Gba(gba) => gba
+                        .set_emulated_cartridge(path.as_path())
+                        .map_err(|error| error.to_string()),
+                }
+            })();
             match result {
                 Ok(()) => ui::send(ui::Message::EnterGame),
                 Err(err) => {
-                    bitstream::current().ensure_boot().unwrap();
-                    ui::send(ui::Message::RomSelectError(err))
+                    let message = recover_to_boot("failed to load ROM", err);
+                    ui::send(ui::Message::RomSelectError(message))
                 }
             }
+            crate::util::log_memory_checkpoint("after ROM load");
         }
         Message::ListRoms { path, page } => match read_rom_list_page(&path, page) {
             Ok(page) => {
@@ -183,17 +239,31 @@ fn dispatch(message: Message) {
             InputManager::lock().remove_all_gamepads();
             let mut device = Device::lock();
             device.docked = true;
-            device.change_display_mode(DisplayMode::External).unwrap();
+            if let Err(error) = device.change_display_mode(DisplayMode::External) {
+                log::error!("Failed to switch to external display: {error:#}");
+                ui::send(ui::Message::FatalError(format!(
+                    "Failed to switch to external display: {error:#}"
+                )));
+            }
         }
         Message::DockEnd => {
             ui::send(ui::Message::DockEnd);
             InputManager::lock().remove_all_gamepads();
             let mut device = Device::lock();
             device.docked = false;
-            device.change_display_mode(DisplayMode::Internal).unwrap();
+            if let Err(error) = device.change_display_mode(DisplayMode::Internal) {
+                log::error!("Failed to switch to internal display: {error:#}");
+                ui::send(ui::Message::FatalError(format!(
+                    "Failed to switch to internal display: {error:#}"
+                )));
+            }
         }
         Message::EnsureBootBitstream => {
-            bitstream::current().ensure_boot().unwrap();
+            if let Err(error) = bitstream::current().ensure_boot() {
+                let message = format!("Failed to restore boot bitstream: {error}");
+                log::error!("{message}");
+                ui::send(ui::Message::FatalError(message));
+            }
         }
         Message::IdleTimerExpired => {
             // If the idle timer expires during setup, just power off.

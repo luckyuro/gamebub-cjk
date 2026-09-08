@@ -43,36 +43,65 @@ pub fn current() -> MutexGuard<'static, CurrentBitstream> {
     CURRENT.lock().unwrap()
 }
 
-fn program_fpga(path: &str) {
+fn program_fpga(path: &str) -> Result<(), String> {
     log::info!("Loading bitstream {}", path);
     led::LedController::set_behavior(led::LedBehavior::LOADING);
     let mut device = Device::lock();
     let display_mode = device.get_display_mode();
 
-    if let DisplayMode::Internal = display_mode {
-        // Avoid LCD artifacts during FPGA reprogram.
-        device.set_lcd_enabled(false);
-        // For some reason, we need to sleep for a short amount of time here
-        // (before doing FPGA program), otherwise the LCD won't properly sleep.
-        // 2 ms is sometimes sufficient, 5 ms is always sufficient, 10 ms seems to always work.
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let result = (|| {
+        if let DisplayMode::Internal = display_mode {
+            // Avoid LCD artifacts during FPGA reprogram.
+            device
+                .set_lcd_enabled(false)
+                .map_err(|error| format!("failed to put LCD to sleep: {error:#}"))?;
+            // For some reason, we need to sleep for a short amount of time here
+            // (before doing FPGA program), otherwise the LCD won't properly sleep.
+            // 2 ms is sometimes sufficient, 5 ms is always sufficient, 10 ms seems to always work.
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
-    let file = crate::util::open_system_file(path).unwrap();
-    let mut bitstream = heatshrink_decompress_stream(file);
+        let file = crate::util::open_system_file(path)
+            .map_err(|error| format!("failed to open bitstream {path}: {error}"))?;
+        let mut bitstream = heatshrink_decompress_stream(file);
+        let mut scratch = SCRATCH
+            .take()
+            .ok_or_else(|| "FPGA scratch buffer is already in use".to_string())?;
 
-    device
-        .fpga
-        .program(&mut bitstream, &mut SCRATCH.take().unwrap())
-        .unwrap();
-    device.fpga.set_display_mode(display_mode).unwrap();
-    device.fpga.enable_interrupt(fpga::Irq::Button).unwrap();
-    ui::send(ui::Message::InputState(device.get_input_state().unwrap()));
-    ui::send(ui::Message::Redraw);
+        device
+            .fpga
+            .program(&mut bitstream, &mut scratch)
+            .map_err(|error| format!("failed to program bitstream {path}: {error}"))?;
+        device
+            .fpga
+            .set_display_mode(display_mode)
+            .map_err(|error| format!("failed to restore display mode: {error}"))?;
+        device
+            .fpga
+            .enable_interrupt(fpga::Irq::Button)
+            .map_err(|error| format!("failed to enable button interrupt: {error}"))?;
+        let input_state = device
+            .get_input_state()
+            .map_err(|()| "failed to read input state".to_string())?;
+        ui::send(ui::Message::InputState(input_state));
+        ui::send(ui::Message::Redraw);
+        Ok(())
+    })();
+
     led::LedController::set_behavior(led::LedBehavior::OFF);
 
-    if let DisplayMode::Internal = display_mode {
-        device.set_lcd_enabled(true);
+    let lcd_result = if let DisplayMode::Internal = display_mode {
+        device
+            .set_lcd_enabled(true)
+            .map_err(|error| format!("failed to wake LCD: {error:#}"))
+    } else {
+        Ok(())
+    };
+
+    match (result, lcd_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(lcd_error)) => Err(format!("{error}; {lcd_error}")),
     }
 }
 
@@ -81,9 +110,12 @@ pub fn program_boot(device: &mut Device) -> anyhow::Result<()> {
     let file = crate::util::open_system_file("boot.bit.hs").context("Failed to read bitstream")?;
     let mut bitstream = heatshrink_decompress_stream(file);
 
+    let mut scratch = SCRATCH
+        .take()
+        .context("FPGA scratch buffer is already in use")?;
     device
         .fpga
-        .program(&mut bitstream, &mut SCRATCH.take().unwrap())
+        .program(&mut bitstream, &mut scratch)
         .context("Failed to program FPGA")
 }
 
@@ -111,12 +143,25 @@ impl CurrentBitstream {
         }
     }
 
-    fn set(&mut self, new: CurrentBitstream) -> Result<(), String> {
-        *self = new;
-        if let Some(bitstream) = self.get() {
-            program_fpga(bitstream.get_bitstream_path());
-            bitstream.on_after_program()?;
+    fn set(&mut self, mut new: CurrentBitstream) -> Result<(), String> {
+        if let Some(bitstream) = new.get() {
+            let result = program_fpga(bitstream.get_bitstream_path())
+                .and_then(|()| bitstream.on_after_program());
+            if let Err(error) = result {
+                // A failed configuration can leave the FPGA partially programmed. Restore the
+                // boot design here because `None` also represents an already-loaded boot design.
+                return match program_fpga("boot.bit.hs") {
+                    Ok(()) => {
+                        *self = CurrentBitstream::None;
+                        Err(error)
+                    }
+                    Err(recovery_error) => Err(format!(
+                        "{error}; additionally failed to restore boot bitstream: {recovery_error}"
+                    )),
+                };
+            }
         }
+        *self = new;
         Ok(())
     }
 
@@ -125,8 +170,9 @@ impl CurrentBitstream {
         match self {
             CurrentBitstream::None => Ok(()),
             _ => {
-                program_fpga("boot.bit.hs");
-                self.set(CurrentBitstream::None)
+                program_fpga("boot.bit.hs")?;
+                *self = CurrentBitstream::None;
+                Ok(())
             }
         }
     }

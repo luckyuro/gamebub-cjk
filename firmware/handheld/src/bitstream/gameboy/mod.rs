@@ -24,6 +24,7 @@ mod rtc;
 
 const SYSTEM_CLOCK_RATE: Hertz = Hertz(8 * 1024 * 1024);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
+const MAX_ROM_SIZE: u64 = 8 * 1024 * 1024;
 
 const REG_EMU_CONFIG: u32 = 0xE000_0000;
 const REG_EMU_CART_CONFIG: u32 = 0xE000_0004;
@@ -45,12 +46,24 @@ const DMG_PALETTE_BASE: u32 = 0xE020_0000;
 pub enum GameboyError {
     #[error("unsupported cartridge type {0}")]
     UnsupportedCartridgeType(u8),
-    #[error("I/O error")]
+    #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("FPGA error")]
+    #[error("FPGA error: {0}")]
     FpgaError(#[from] crate::device::drivers::fpga::Error),
-    #[error("Invalid bootrom")]
+    #[error("IMU error: {0}")]
+    ImuError(#[from] crate::device::drivers::imu::Error),
+    #[error("invalid bootrom")]
     InvalidBootrom,
+    #[error("unsupported ROM size code {0:#04x}")]
+    UnsupportedRomSize(u8),
+    #[error("ROM size {0} exceeds the 8 MiB cartridge address space")]
+    RomTooLarge(u64),
+    #[error("ROM is truncated: file has {actual} bytes, header requires {expected} bytes")]
+    RomTruncated { actual: u32, expected: u32 },
+    #[error("ROM size changed while reading: expected {expected} bytes, read {actual} bytes")]
+    RomSizeChanged { expected: u32, actual: u32 },
+    #[error("scratch buffer is already in use")]
+    ScratchBufferUnavailable,
 }
 
 /// Driver for Gameboy FPGA module
@@ -73,8 +86,8 @@ impl Gameboy {
     }
 
     fn get_bootrom_path() -> &'static str {
-        let is_dmg = kvs::keys::GB_IS_DMG.get().unwrap();
-        let skip = kvs::keys::GB_SKIP_BOOT_ANIM.get().unwrap();
+        let is_dmg = kvs::keys::GB_IS_DMG.get().unwrap_or(false);
+        let skip = kvs::keys::GB_SKIP_BOOT_ANIM.get().unwrap_or(false);
 
         if is_dmg {
             if skip {
@@ -99,18 +112,23 @@ impl Gameboy {
 
         log::info!("Loading CGB bootrom");
         let mut bios_file = crate::util::open_system_file(bios_path)?;
-        let mut scratch = super::SCRATCH.take().expect("scratch buffer");
-        let mut buf = &mut scratch[..2048];
+        let mut scratch = super::SCRATCH
+            .take()
+            .ok_or(GameboyError::ScratchBufferUnavailable)?;
+        let buf = &mut scratch[..2048];
+        buf.fill(0);
 
         let file_len = bios_file.metadata()?.len();
-        if file_len == 2048 || file_len == 256 {
-            bios_file.read(&mut buf)?;
+        if file_len == 2048 {
+            bios_file.read_exact(buf)?;
+        } else if file_len == 256 {
+            bios_file.read_exact(&mut buf[..256])?;
         } else if file_len == (2048 + 256) {
             // Assume this is a bootrom with 256 bytes of padding at offset 256.
             log::warn!("Removing CGB bootrom padding");
-            bios_file.read(&mut buf[0..256])?;
+            bios_file.read_exact(&mut buf[0..256])?;
             bios_file.seek(SeekFrom::Current(256))?;
-            bios_file.read(&mut buf[256..])?;
+            bios_file.read_exact(&mut buf[256..])?;
         } else {
             log::error!("Bootrom invalid length: {}", file_len);
             return Err(GameboyError::InvalidBootrom);
@@ -128,7 +146,7 @@ impl Gameboy {
         let max_clock = Hertz(10_000_000);
         device
             .fpga
-            .spi_write(Some(max_clock), command, address, &buf)?;
+            .spi_write(Some(max_clock), command, address, buf)?;
 
         self.bootrom_path = Some(bios_path);
         Ok(())
@@ -140,11 +158,11 @@ impl Gameboy {
         device.fpga.write_u32(fpga::REG_CONTROL, 0b0000)?;
 
         // Set configuration
-        let is_dmg = kvs::keys::GB_IS_DMG.get().unwrap();
+        let is_dmg = kvs::keys::GB_IS_DMG.get().unwrap_or(false);
         let config = 0 | (((!is_dmg) as u32) << 0);
         device.fpga.write_u32(REG_EMU_CONFIG, config)?;
 
-        device.imu.disable_accel().unwrap();
+        device.imu.disable_accel()?;
 
         // Disable vblank IRQ
         device.fpga.disable_interrupt(fpga::Irq::ModuleVblank)?;
@@ -156,7 +174,7 @@ impl Gameboy {
             if is_dmg {
                 &IDENTITY
             } else {
-                let setting = kvs::keys::CGB_COLOR_PROFILE.get().unwrap() as usize;
+                let setting = kvs::keys::CGB_COLOR_PROFILE.get().unwrap_or(1) as usize;
                 corrections.get(setting).unwrap_or(&&IDENTITY)
             }
         };
@@ -165,7 +183,7 @@ impl Gameboy {
 
         // DMG palettes
         if is_dmg {
-            let setting = kvs::keys::DMG_COLOR_PALETTE.get().unwrap() as usize;
+            let setting = kvs::keys::DMG_COLOR_PALETTE.get().unwrap_or(1) as usize;
             let palette = dmg_palette::PALETTES
                 .get(setting)
                 .unwrap_or(&dmg_palette::PALETTES[0]);
@@ -189,7 +207,7 @@ impl Gameboy {
 
         // Resume
         device.fpga.write_u32(fpga::REG_CONTROL, 0b1011)?;
-        device.imu.disable_accel().unwrap();
+        device.imu.disable_accel()?;
 
         Ok(())
     }
@@ -202,19 +220,35 @@ impl Gameboy {
 
         // Load ROM
         let mut rom_file = File::open(rom_path)?;
-        let rom_file_size = rom_file.metadata()?.len() as u32;
+        let rom_file_size = rom_file.metadata()?.len();
+        if rom_file_size > MAX_ROM_SIZE {
+            return Err(GameboyError::RomTooLarge(rom_file_size));
+        }
+        let rom_file_size = rom_file_size as u32;
         let mut rom_header = [0u8; 0x150];
-        rom_file.read(&mut rom_header)?;
+        rom_file.read_exact(&mut rom_header)?;
         let rom_header = rom::RomHeader::parse(rom_header)?;
+        if rom_file_size < rom_header.rom_size {
+            return Err(GameboyError::RomTruncated {
+                actual: rom_file_size,
+                expected: rom_header.rom_size,
+            });
+        }
         rom_file.seek(std::io::SeekFrom::Start(0))?;
         log::info!("Loading rom: {:?}", rom_header);
 
-        let mut scratch = super::SCRATCH.take().expect("scratch buffer");
+        let mut scratch = super::SCRATCH
+            .take()
+            .ok_or(GameboyError::ScratchBufferUnavailable)?;
         let mut last_progress_update = Instant::now();
         let mut total = 0u32;
-        crate::util::background_io::iter_chunks(rom_file, &mut scratch, |chunk| {
-            let _ = Device::lock().fpga.sdram_write(total, &chunk);
-            total += chunk.len() as u32;
+        crate::util::background_io::iter_chunks::<GameboyError>(rom_file, &mut scratch, |chunk| {
+            let new_total = u64::from(total) + chunk.len() as u64;
+            if new_total > MAX_ROM_SIZE {
+                return Err(GameboyError::RomTooLarge(new_total));
+            }
+            Device::lock().fpga.sdram_write(total, chunk)?;
+            total = new_total as u32;
 
             // Update UI progress bar.
             if last_progress_update.elapsed() > PROGRESS_UPDATE_INTERVAL {
@@ -222,7 +256,14 @@ impl Gameboy {
                 ui::send(ui::Message::RomLoadingProgress(progress));
                 last_progress_update = Instant::now();
             }
+            Ok(())
         })?;
+        if total != rom_file_size {
+            return Err(GameboyError::RomSizeChanged {
+                expected: rom_file_size,
+                actual: total,
+            });
+        }
         ui::send(ui::Message::RomLoadingProgress(1.0));
         drop(scratch);
 
@@ -232,7 +273,9 @@ impl Gameboy {
         match File::open(ram_path.as_path()) {
             Ok(mut ram_file) => {
                 log::info!("Loading RAM");
-                let mut scratch = super::SCRATCH.take().expect("scratch buffer");
+                let mut scratch = super::SCRATCH
+                    .take()
+                    .ok_or(GameboyError::ScratchBufferUnavailable)?;
                 let buf = scratch.deref_mut();
 
                 let mut pos = 0u32;
@@ -259,8 +302,9 @@ impl Gameboy {
                         let elapsed = device
                             .get_datetime()
                             .unix_timestamp()
-                            .saturating_sub_unsigned(rtc_timestamp);
-                        rtc_state.advance(elapsed as u64);
+                            .saturating_sub_unsigned(rtc_timestamp)
+                            .max(0) as u64;
+                        rtc_state.advance(elapsed);
                         device.fpga.write_u32(REG_RTC_STATE, rtc_state.to_fpga())?;
                         device
                             .fpga
@@ -291,12 +335,12 @@ impl Gameboy {
         device.fpga.write_u32(REG_EMU_CART_RAM_ADDR, 0)?;
         device
             .fpga
-            .write_u32(REG_EMU_CART_RAM_MASK, rom_header.ram_size - 1)?;
+            .write_u32(REG_EMU_CART_RAM_MASK, rom_header.ram_size.saturating_sub(1))?;
 
         // If IMU is needed, enable vsync IRQ
         if rom_header.has_sensor {
             // XXX: if other components need IMU too, switch to a global lease system
-            device.imu.enable_accel().unwrap();
+            device.imu.enable_accel()?;
             device.fpga.enable_interrupt(fpga::Irq::ModuleVblank)?;
         }
 
@@ -319,7 +363,9 @@ impl Gameboy {
         log::info!("Saving RAM: {}", ram_path.display());
 
         let mut file = File::create(ram_path)?;
-        let mut scratch = super::SCRATCH.take().expect("scratch buffer");
+        let mut scratch = super::SCRATCH
+            .take()
+            .ok_or(GameboyError::ScratchBufferUnavailable)?;
         let buf = scratch.deref_mut();
         let mut address: u32 = 0;
         let mut bytes_left = ram_size as usize;
@@ -329,7 +375,7 @@ impl Gameboy {
             let to_read = bytes_left.min(buf.len());
             let data = &mut buf[0..to_read];
             device.fpga.sram_read(address, data)?;
-            file.write(data)?;
+            file.write_all(data)?;
             address += to_read as u32;
             bytes_left -= to_read;
         }
@@ -337,9 +383,9 @@ impl Gameboy {
         if self.rom_header.as_ref().map_or(false, |h| h.has_rtc) {
             let rtc_state = rtc::RtcState::from_fpga(device.fpga.read_u32(REG_RTC_STATE)?);
             let rtc_latched = rtc::RtcState::from_fpga(device.fpga.read_u32(REG_RTC_LATCHED)?);
-            file.write(&rtc_state.to_disk())?;
-            file.write(&rtc_latched.to_disk())?;
-            file.write(&(device.get_datetime().unix_timestamp() as u64).to_le_bytes())?;
+            file.write_all(&rtc_state.to_disk())?;
+            file.write_all(&rtc_latched.to_disk())?;
+            file.write_all(&(device.get_datetime().unix_timestamp() as u64).to_le_bytes())?;
             log::info!("Wrote RTC state: {:?}", rtc_state);
         }
 
@@ -366,10 +412,13 @@ impl Bitstream for Gameboy {
         let mut device = Device::lock();
 
         // Enable/disable IMU as needed
-        if !paused && self.rom_header.as_ref().map_or(false, |h| h.has_sensor) {
-            device.imu.enable_accel().unwrap();
+        let imu_result = if !paused && self.rom_header.as_ref().map_or(false, |h| h.has_sensor) {
+            device.imu.enable_accel()
         } else {
-            device.imu.disable_accel().unwrap();
+            device.imu.disable_accel()
+        };
+        if let Err(error) = imu_result {
+            log::error!("Failed to update accelerometer state: {error}");
         }
 
         device
@@ -398,17 +447,21 @@ impl Bitstream for Gameboy {
 
     fn on_vblank_irq(&mut self) {
         let mut device = Device::lock();
-        let sample = device.imu.read_accel().unwrap();
+        let sample = match device.imu.read_accel() {
+            Ok(sample) => sample,
+            Err(error) => {
+                log::error!("Failed to read accelerometer: {error}");
+                return;
+            }
+        };
         // Invert X and Y
         let accel_x = ((0x81D0 as f32) + ((0x70 as f32) * -sample.x)) as u16;
         let accel_y = ((0x81D0 as f32) + ((0x70 as f32) * -sample.y)) as u16;
-        device
-            .fpga
-            .write_u32(REG_IMU_ACCEL_X, accel_x as u32)
-            .unwrap();
-        device
-            .fpga
-            .write_u32(REG_IMU_ACCEL_Y, accel_y as u32)
-            .unwrap();
+        if let Err(error) = device.fpga.write_u32(REG_IMU_ACCEL_X, accel_x as u32) {
+            log::error!("Failed to update accelerometer X: {error}");
+        }
+        if let Err(error) = device.fpga.write_u32(REG_IMU_ACCEL_Y, accel_y as u32) {
+            log::error!("Failed to update accelerometer Y: {error}");
+        }
     }
 }

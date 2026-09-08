@@ -42,6 +42,7 @@ impl Kvs {
 }
 
 const SMALL_SIZE: usize = 128;
+const MAX_VALUE_SIZE: usize = 4096;
 
 pub struct CacheEntry<T> {
     value: Option<T>,
@@ -80,12 +81,38 @@ impl<T: Serialize + DeserializeOwned + Clone> KvsKey<T> {
     fn get_direct(&self) -> Option<T> {
         let mut kvs = Kvs::get();
         let nvs = kvs.nvs(self.read_only);
-        let len = nvs.len(self.name).expect("error reading len")?;
+        let len = match nvs.len(self.name) {
+            Ok(Some(len)) => len,
+            Ok(None) => return None,
+            Err(error) => {
+                log::error!("Failed to read KVS length for {}: {error}", self.name);
+                return None;
+            }
+        };
+        if len > MAX_VALUE_SIZE {
+            log::error!(
+                "Ignoring oversized KVS value for {}: {} bytes",
+                self.name,
+                len
+            );
+            return None;
+        }
         let mut v = SmallVec::<[u8; SMALL_SIZE]>::from_elem(0, len);
-        let data = nvs
-            .get_raw(self.name, &mut v)
-            .expect("error reading value")?;
-        Some(postcard::from_bytes(data).expect("error deserializing"))
+        let data = match nvs.get_raw(self.name, &mut v) {
+            Ok(Some(data)) => data,
+            Ok(None) => return None,
+            Err(error) => {
+                log::error!("Failed to read KVS value for {}: {error}", self.name);
+                return None;
+            }
+        };
+        match postcard::from_bytes(data) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                log::error!("Ignoring invalid KVS value for {}: {error}", self.name);
+                None
+            }
+        }
     }
 
     pub fn get(&self) -> Option<T> {
@@ -109,12 +136,19 @@ impl<T: Serialize + DeserializeOwned + Clone> KvsKey<T> {
         value.or_else(|| self.default.clone())
     }
 
-    fn set_direct(&self, value: &T) {
+    fn set_direct(&self, value: &T) -> bool {
         let mut kvs = Kvs::get();
         let nvs = kvs.nvs(self.read_only);
         let mut v = SmallVec::<[u8; SMALL_SIZE]>::new();
-        postcard::to_io(value, &mut v).expect("error serializing");
-        nvs.set_raw(self.name, &v).expect("error writing");
+        if let Err(error) = postcard::to_io(value, &mut v) {
+            log::error!("Failed to serialize KVS value for {}: {error}", self.name);
+            return false;
+        }
+        if let Err(error) = nvs.set_raw(self.name, &v) {
+            log::error!("Failed to write KVS value for {}: {error}", self.name);
+            return false;
+        }
+        true
     }
 
     pub fn set(&self, value: &T) {
@@ -131,9 +165,12 @@ impl<T: Serialize + DeserializeOwned + Clone> KvsKey<T> {
             if cache.dirty {
                 if let Some(value) = cache.value.as_ref() {
                     log::info!("Flushing KVS: {}", self.name);
-                    self.set_direct(value);
+                    if self.set_direct(value) {
+                        cache.dirty = false;
+                    }
+                } else {
+                    cache.dirty = false;
                 }
-                cache.dirty = false;
             }
         }
     }
