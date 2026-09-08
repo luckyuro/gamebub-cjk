@@ -244,12 +244,16 @@ impl CoreHandler for Gameboy {
     fn on_before_file_load(&mut self, id: u16, file: &mut File) -> Result<(), String> {
         if id == FILE_ROM {
             let size = file.metadata().map_err(|e| e.to_string())?.len();
-            if size > 8 * 1024 * 1024 { return Err("ROM exceeds 8 MiB".into()); }
+            if size > 8 * 1024 * 1024 {
+                return Err("ROM exceeds 8 MiB".into());
+            }
             self.rom_file_size = size as u32;
             let mut rom_header = [0u8; 0x150];
             file.read_exact(&mut rom_header).map_err(|_| "I/O")?;
             let rom_header = rom::RomHeader::parse(rom_header).map_err(|e| e.to_string())?;
-            if self.rom_file_size < rom_header.rom_size { return Err("Truncated ROM".into()); }
+            if self.rom_file_size < rom_header.rom_size {
+                return Err("Truncated ROM".into());
+            }
             file.seek(std::io::SeekFrom::Start(0)).map_err(|_| "I/O")?;
             self.rom_header = Some(rom_header);
         } else if id == FILE_SAVE {
@@ -268,7 +272,8 @@ impl CoreHandler for Gameboy {
                     let elapsed = device
                         .get_datetime()
                         .unix_timestamp()
-                        .saturating_sub_unsigned(rtc_timestamp).max(0);
+                        .saturating_sub_unsigned(rtc_timestamp)
+                        .max(0);
                     rtc_state.advance(elapsed as u64);
                     log::info!(
                         "Loaded saved RTC state: {:?}, elapsed={}",

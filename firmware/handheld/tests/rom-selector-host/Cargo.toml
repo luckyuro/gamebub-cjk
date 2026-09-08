@@ -1,0 +1,19 @@
+[package]
+name = "rom-selector-host"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+rom-list-scroll = []
+
+[dependencies]
+log = "0.4"
+slint = { version = "=1.12.1", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
+
+[build-dependencies]
+embuild = { version = "0.33.0", features = ["espidf"] }
+regex = "1.13.1"
+slint-build = "=1.12.1"

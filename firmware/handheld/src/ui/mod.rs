@@ -68,7 +68,7 @@ pub enum Message {
     /// Open core file selection screen
     CoreFileSelectBegin { label: String, path: PathBuf },
     /// Update core file selection list
-    CoreFileSelectList(Vec<(String, bool)>),
+    CoreFileSelectList(crate::rom_list::RomListPage),
     /// Core file select error
     CoreFileSelectError(String),
     /// Core load error
@@ -81,11 +81,11 @@ pub enum Message {
 pub fn send(message: Message) {
     match SENDER.get() {
         Some(sender) => {
-            if let Err(mpsc::SendError(message)) = sender.send(message) {
-                log::error!("Dropping UI message because the UI stopped: {:?}", message);
+            if sender.send(message).is_err() {
+                log::error!("Dropping UI message because the UI stopped");
             }
         }
-        None => log::error!("Dropping UI message {:?}", message),
+        None => log::error!("Dropping UI message"),
     }
 }
 

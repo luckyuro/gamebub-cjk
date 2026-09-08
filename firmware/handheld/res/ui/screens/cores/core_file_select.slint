@@ -60,7 +60,11 @@ export component CoreFileSelect {
                     x: 0px;
                     width: scroll-bar.x;
                     model: Backend.core-file-select-list;
-                    wrap: true;
+                    wrap: !Backend.core-file-select-scroll;
+                    auto-continue: Backend.core-file-select-scroll;
+                    has-previous: Backend.core-file-select-has-previous;
+                    has-next: Backend.core-file-select-has-next;
+                    page-requested(next) => { Backend.core-file-select-page(next); }
                     disabled: Backend.core-file-select-is-loading || has-error;
                     on-item-selected(i) => {
                         Backend.core-file-select-index = i;
@@ -78,12 +82,16 @@ export component CoreFileSelect {
                     width: scrollbar-width;
                     height: parent.height - 4px;
                     inner := Rectangle {
-                        y: (-list.viewport-y / list.viewport-height) * parent.height;
+                        y: (-list.viewport-y / max(1px, list.viewport-height)) * parent.height;
                         width: 100%;
-                        height: (list.height / list.viewport-height) * parent.height;
+                        height: (list.height / max(1px, list.viewport-height)) * parent.height;
                         background: black;
                     }
                 }
+            }
+
+            Text {
+                text: Backend.core-file-select-scroll ? "Up/Down: scroll" : "Left/Right or L/R: page";
             }
 
             HorizontalLayout {

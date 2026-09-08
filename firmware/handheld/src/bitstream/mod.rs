@@ -43,7 +43,8 @@ pub fn program_fpga(path: &Path) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        let file = File::open(path).map_err(|e| format!("failed to open bitstream {}: {e}", path.display()))?;
+        let file = File::open(path)
+            .map_err(|e| format!("failed to open bitstream {}: {e}", path.display()))?;
         let mut bitstream: Box<dyn Read> = if path.extension() == Some(OsStr::new("hs")) {
             Box::new(heatshrink_decompress_stream(file))
         } else if path.extension() == Some(OsStr::new("bit")) {

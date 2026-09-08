@@ -8,7 +8,7 @@ use std::{fs::File, io::Read, time::Instant};
 pub fn iter_chunks<E>(
     mut file: File,
     buffer: &mut [u8],
-    mut consume: impl FnMut(&[u8]) -> Result<std::time::Duration, E>,
+    mut consume: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<std::time::Duration, E>
 where
     E: From<std::io::Error>,

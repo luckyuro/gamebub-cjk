@@ -125,6 +125,10 @@ export global Backend {
     callback tools-get-battery-info() -> BatteryInfo;
     callback core-list-fetch();
     callback core-run(string);
+    in property <bool> core-file-select-scroll: false;
+    in property <bool> core-file-select-has-previous: false;
+    in property <bool> core-file-select-has-next: false;
+    callback core-file-select-page(bool);
     callback core-file-select-selected(int);
     callback core-file-select-up();
     callback core-file-select-cancel();

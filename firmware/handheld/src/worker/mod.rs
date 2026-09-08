@@ -40,6 +40,10 @@ pub enum Message {
     ExitCore,
     /// A file was selected for the core (could be a directory).
     CoreFileSelected(PathBuf),
+    CoreFileList {
+        path: PathBuf,
+        page: crate::rom_list::RomListPageRequest,
+    },
     /// Core file selection was cancelled.
     CoreFileCancelled,
     /// Core focus changed
@@ -110,7 +114,9 @@ fn dispatch(message: Message) {
                 match device.get_cart_switch() {
                     Ok(value) => value,
                     Err(error) => {
-                        ui::send(ui::Message::CoreLoadError(format!("Failed to read cartridge switch: {error}")));
+                        ui::send(ui::Message::CoreLoadError(format!(
+                            "Failed to read cartridge switch: {error}"
+                        )));
                         return;
                     }
                 }
@@ -167,6 +173,9 @@ fn dispatch(message: Message) {
         Message::FetchCoreList => CoreManager::lock().list_cores(),
         Message::RunCore(id) => CoreManager::lock().run_core(&id, false),
         Message::ExitCore => CoreManager::lock().exit_core(),
+        Message::CoreFileList { path, page } => {
+            CoreManager::lock().send_core_file_list(&path, page)
+        }
         Message::CoreFileSelected(file) => CoreManager::lock().handle_file_selected(file),
         Message::CoreFileCancelled => CoreManager::lock().cancel_file_select(),
         Message::CoreFocusChanged(focused) => CoreManager::lock().focus_changed(focused),

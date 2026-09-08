@@ -28,6 +28,8 @@ pub struct UiState {
     core_file_select_directory: PathBuf,
     core_file_select_filename: String,
     core_file_select_timer: Timer,
+    core_file_select_page_first: Option<crate::rom_list::RomListEntry>,
+    core_file_select_page_last: Option<crate::rom_list::RomListEntry>,
 }
 
 impl UiState {
@@ -41,6 +43,8 @@ impl UiState {
             core_file_select_directory: PathBuf::new(),
             core_file_select_filename: String::new(),
             core_file_select_timer: Timer::default(),
+            core_file_select_page_first: None,
+            core_file_select_page_last: None,
         };
         let state = Rc::new(RefCell::new(state));
         state.borrow_mut().setup(state.clone(), device);

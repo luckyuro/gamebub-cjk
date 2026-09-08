@@ -19,6 +19,8 @@ opt-level = "z"
 
 [features]
 default = ["std", "embassy", "esp-idf-svc/native"]
+# Omit for button paging; enable for automatic continuation with Up/Down.
+rom-list-scroll = []
 rev1 = ["has_io_expander", "has_ili9488", "has_max17048"]  # Build for handheld revision 1
 rev2 = ["has_io_expander", "has_ili9488", "has_max17048"]  # Build for handheld revision 2
 rev3 = ["has_st7262", "has_bq27427"]  # Build for handheld revision 3

@@ -11,6 +11,7 @@ use esp_idf_svc::hal::units::Hertz;
 use thiserror::Error;
 
 use self::CoreError::*;
+use crate::rom_list::{read_file_list_page, RomListPageRequest};
 use crate::{
     bitstream,
     device::{
@@ -29,10 +30,6 @@ mod settings;
 
 static CORE_MANAGER: LazyLock<Mutex<CoreManager>> =
     LazyLock::new(|| Mutex::new(CoreManager::new()));
-
-/// Maximum number of files to show at once.
-/// TODO: save memory and increase this limit (or avoid altogether)
-const FILE_LIST_MAX: usize = 100;
 
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
 const NOTIFY_TIMEOUT: Duration = Duration::from_millis(10);
@@ -447,7 +444,16 @@ impl CoreManager {
             label: file.label.to_string(),
             path: initial_path.to_path_buf(),
         });
-        self.send_core_file_list(initial_dir);
+        let page = if initial_path.is_file() {
+            initial_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| RomListPageRequest::ForName(name.into()))
+                .unwrap_or(RomListPageRequest::First)
+        } else {
+            RomListPageRequest::First
+        };
+        self.send_core_file_list(initial_dir, page);
     }
 
     fn finish_loading(&mut self) {
@@ -467,7 +473,9 @@ impl CoreManager {
         if self.run_cartridge {
             let mut device = Device::lock();
             // Power turned off in reset_state.
-            device.set_cart_power(true).map_err(|e| Other(e.to_string()))?;
+            device
+                .set_cart_power(true)
+                .map_err(|e| Other(e.to_string()))?;
         }
 
         self.load_files()?;
@@ -512,7 +520,9 @@ impl CoreManager {
         let mut overall_total = 0u64;
         let mut last_progress_update = Instant::now();
 
-        let mut scratch = crate::bitstream::SCRATCH.take().ok_or_else(|| Other("scratch buffer is already in use".into()))?;
+        let mut scratch = crate::bitstream::SCRATCH
+            .take()
+            .ok_or_else(|| Other("scratch buffer is already in use".into()))?;
 
         let core = self.core_info.as_ref().unwrap();
         let file_0_index = core.files.iter().position(|f| f.id == 0);
@@ -603,40 +613,44 @@ impl CoreManager {
             let mut handler_duration = Duration::ZERO;
             let mut transferred = 0;
             // TODO: maybe only bother with background I/O for a large file (> 256KB?)
-            let result = crate::util::background_io::iter_chunks::<CoreError>(file, &mut scratch, |chunk| {
-                if u64::from(transferred) + chunk.len() as u64 > file_size {
-                    return Err(Other("File grew while reading".into()));
-                }
-                let transfer_start = Instant::now();
-                let max_clock = Some(Hertz(info.max_transfer_speed * 1000 * 2));
-                let command = SpiCommand::new(info.transfer_word_size);
-                Device::lock()
-                    .fpga
-                    .spi_write(max_clock, command, info.address + transferred, chunk)
-                    .map_err(|e| Other(e.to_string()))?;
-                transferred += chunk.len() as u32;
-                overall_transferred += chunk.len() as u64;
-                transfer_duration += transfer_start.elapsed();
+            let result =
+                crate::util::background_io::iter_chunks::<CoreError>(file, &mut scratch, |chunk| {
+                    if u64::from(transferred) + chunk.len() as u64 > file_size {
+                        return Err(Other("File grew while reading".into()));
+                    }
+                    let transfer_start = Instant::now();
+                    let max_clock = Some(Hertz(info.max_transfer_speed * 1000 * 2));
+                    let command = SpiCommand::new(info.transfer_word_size);
+                    Device::lock()
+                        .fpga
+                        .spi_write(max_clock, command, info.address + transferred, chunk)
+                        .map_err(|e| Other(e.to_string()))?;
+                    transferred += chunk.len() as u32;
+                    overall_transferred += chunk.len() as u64;
+                    transfer_duration += transfer_start.elapsed();
 
-                let handler_start = Instant::now();
+                    let handler_start = Instant::now();
 
-                if let Some(core_handler) = self.core_handler.get_mut() {
-                    core_handler.on_during_file_load(info.id, chunk);
-                }
-                handler_duration += handler_start.elapsed();
+                    if let Some(core_handler) = self.core_handler.get_mut() {
+                        core_handler.on_during_file_load(info.id, chunk);
+                    }
+                    handler_duration += handler_start.elapsed();
 
-                // Update UI progress bar.
-                if last_progress_update.elapsed() > PROGRESS_UPDATE_INTERVAL {
-                    let progress = (overall_transferred as f32) / (overall_total as f32);
-                    ui::send(ui::Message::CoreLoadProgress(progress));
-                    last_progress_update = Instant::now();
-                }
-                Ok(())
-            });
-            let read_duration = result
-                .map_err(|e| FailedLoadFile(info.label.to_string(), e.to_string()))?;
+                    // Update UI progress bar.
+                    if last_progress_update.elapsed() > PROGRESS_UPDATE_INTERVAL {
+                        let progress = (overall_transferred as f32) / (overall_total as f32);
+                        ui::send(ui::Message::CoreLoadProgress(progress));
+                        last_progress_update = Instant::now();
+                    }
+                    Ok(())
+                });
+            let read_duration =
+                result.map_err(|e| FailedLoadFile(info.label.to_string(), e.to_string()))?;
             if u64::from(transferred) != file_size {
-                return Err(FailedLoadFile(info.label.to_string(), "File size changed while reading".into()));
+                return Err(FailedLoadFile(
+                    info.label.to_string(),
+                    "File size changed while reading".into(),
+                ));
             }
 
             let duration = start_time.elapsed();
@@ -701,7 +715,9 @@ impl CoreManager {
 
             let mut file = File::create(path)
                 .map_err(|_| FailedSaveFile(info.label.to_string(), "Open failed".to_string()))?;
-            let mut scratch = crate::bitstream::SCRATCH.take().ok_or_else(|| Other("scratch buffer is already in use".into()))?;
+            let mut scratch = crate::bitstream::SCRATCH
+                .take()
+                .ok_or_else(|| Other("scratch buffer is already in use".into()))?;
             let buf = scratch.deref_mut();
             let mut address: u32 = info.address;
             let mut bytes_left = file_size as usize;
@@ -776,7 +792,7 @@ impl CoreManager {
             self.selected_files[file_index] = Some(path);
             self.next_file_select();
         } else if path.is_dir() {
-            self.send_core_file_list(&path);
+            self.send_core_file_list(&path, RomListPageRequest::First);
         }
     }
 
@@ -788,62 +804,21 @@ impl CoreManager {
         self.stage = Stage::Idle;
     }
 
-    fn send_core_file_list(&self, path: &Path) {
-        let files = match self.list_core_files(&path) {
-            Ok(files) => files,
-            Err(e) => {
-                log::warn!("Error listing directory: {:?}", e);
-                ui::send(ui::Message::CoreFileSelectError(format!(
-                    "Error listing directory:\n{}",
-                    e,
-                )));
-                Vec::new()
-            }
+    pub fn send_core_file_list(&self, path: &Path, page: RomListPageRequest) {
+        let Stage::LoadSelectFile(index) = self.stage else {
+            return;
         };
-        let truncated = files.len() >= FILE_LIST_MAX;
-        ui::send(ui::Message::CoreFileSelectList(files));
-        if truncated {
-            let message =
-                format!("More than {FILE_LIST_MAX} items in directory:\nsome items will be hidden");
-            ui::send(ui::Message::CoreFileSelectError(message));
-        }
-    }
-
-    /// Get the list of eligible files for the file select menu at the given directory
-    fn list_core_files(&self, path: &Path) -> std::io::Result<Vec<(String, bool)>> {
-        // Assumes we're in a valid file selection stage.
-        let file_index = match self.stage {
-            Stage::LoadSelectFile(i) => i,
-            _ => panic!(),
-        };
-        let extensions = &self.core_info.as_ref().unwrap().files[file_index].extensions;
-
-        let mut files = path
-            .read_dir()?
-            .filter_map(|e| {
-                let e = e.ok()?;
-                let name = e.file_name();
-                let name = name.to_str()?;
-                let kind = e.metadata().ok()?.file_type();
-                if name.starts_with(".") {
-                    return None;
-                }
-                if kind.is_file() && !extensions.iter().any(|&e| name.ends_with(e.as_str())) {
-                    return None;
-                }
-
-                Some((name.to_string(), kind))
-            })
-            .take(FILE_LIST_MAX)
+        let extensions = self.core_info.as_ref().unwrap().files[index]
+            .extensions
+            .iter()
+            .map(|extension| extension.as_str())
             .collect::<Vec<_>>();
-        files.sort_unstable_by(|f1, f2| {
-            // Sort by name, with directories first.
-            let c1 = (f1.1.is_file(), f1.0.as_str());
-            let c2 = (f2.1.is_file(), f2.0.as_str());
-            c1.cmp(&c2)
-        });
-        let files = files.into_iter().map(|f| (f.0, f.1.is_dir())).collect();
-        Ok(files)
+        match read_file_list_page(path, page, &extensions) {
+            Ok(page) => ui::send(ui::Message::CoreFileSelectList(page)),
+            Err(error) => ui::send(ui::Message::CoreFileSelectError(format!(
+                "Error listing directory:\n{error}"
+            ))),
+        }
     }
 
     /// Clear a file slot to 0xFF
