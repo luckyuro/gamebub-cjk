@@ -26,11 +26,39 @@ impl UiState {
         let root = self.root.unwrap();
         let backend = root.global::<Backend>();
 
+        backend.set_rom_select_scroll(cfg!(feature = "rom-list-scroll"));
+        let state_ = state.clone();
+        backend.on_rom_select_page(move |next| {
+            let mut state = state_.borrow_mut();
+            let root = state.root.unwrap();
+            let backend = root.global::<Backend>();
+            if backend.get_rom_select_is_loading() {
+                return;
+            }
+            let cursor = if next && backend.get_rom_select_has_next() {
+                state.rom_select_page_last.clone()
+            } else if !next && backend.get_rom_select_has_previous() {
+                state.rom_select_page_first.clone()
+            } else {
+                None
+            };
+            if let Some(cursor) = cursor {
+                state.rom_select_load_page(if next {
+                    RomListPageRequest::After(cursor)
+                } else {
+                    RomListPageRequest::Before(cursor)
+                });
+            }
+        });
+
         let state_ = state.clone();
         backend.on_rom_select_selected(move |index| {
             let mut state = state_.borrow_mut();
             let root = state.root.unwrap();
             let backend = root.global::<Backend>();
+            if backend.get_rom_select_is_loading() || index < 0 {
+                return false;
+            }
             let data = backend.get_rom_select_list().row_data(index as usize);
             if let Some(data) = data {
                 match data.icon {
@@ -63,6 +91,14 @@ impl UiState {
         let state_ = state.clone();
         backend.on_rom_select_up(move || {
             let mut state = state_.borrow_mut();
+            if state
+                .root
+                .unwrap()
+                .global::<Backend>()
+                .get_rom_select_is_loading()
+            {
+                return false;
+            }
             state.rom_select_handle_select(PathBuf::new(), "..", true)
         });
 
@@ -92,17 +128,36 @@ impl UiState {
         self.rom_select_load_page(request);
     }
 
+    fn rom_select_clear_list(&self) {
+        let root = self.root.unwrap();
+        let backend = root.global::<Backend>();
+        // Replacing ModelRc alone is lazy: the repeater can still hold the old
+        // model and rendered rows until layout. Reset its VecModel first so
+        // ModelNotify::reset synchronously drops the old row instances/data.
+        let model = backend.get_rom_select_list();
+        if let Some(model) = model
+            .as_any()
+            .downcast_ref::<VecModel<crate::ui::slint::FileListEntry>>()
+        {
+            model.set_vec(Vec::new());
+        }
+        backend.set_rom_select_list(ModelRc::default());
+        backend.set_rom_select_index(-1);
+    }
+
     fn rom_select_load_page(&mut self, page: RomListPageRequest) {
+        self.rom_select_timer.stop();
         let path = self.rom_select_directory.clone();
         self.rom_select_page_first = None;
         self.rom_select_page_last = None;
         let root = self.root.unwrap();
         let backend = root.global::<Backend>();
-        // Drop the previous page before the worker allocates its replacement.
-        backend.set_rom_select_list(ModelRc::default());
-        backend.set_rom_select_index(-1);
-        backend.set_rom_select_progress(0.0);
         backend.set_rom_select_is_loading(true);
+        self.rom_select_clear_list();
+        backend.set_rom_select_has_previous(false);
+        backend.set_rom_select_has_next(false);
+        backend.set_rom_select_error("".into());
+        backend.set_rom_select_progress(0.0);
 
         worker::send(worker::Message::ListRoms { path, page });
     }
@@ -130,7 +185,7 @@ impl UiState {
                 + usize::from(has_next),
         );
 
-        if path != Path::new(BASE_DIR) {
+        if path != Path::new(BASE_DIR) && (!cfg!(feature = "rom-list-scroll") || !has_previous) {
             if saved_name.as_deref() == Some("..") {
                 selected_saved = Some(files.len());
             }
@@ -140,7 +195,7 @@ impl UiState {
             });
         }
 
-        if has_previous {
+        if has_previous && !cfg!(feature = "rom-list-scroll") {
             files.push(crate::ui::slint::FileListEntry {
                 name: "Previous page".into(),
                 icon: FileIcon::PreviousPage,
@@ -163,7 +218,7 @@ impl UiState {
             });
         }
 
-        if has_next {
+        if has_next && !cfg!(feature = "rom-list-scroll") {
             files.push(crate::ui::slint::FileListEntry {
                 name: "Next page".into(),
                 icon: FileIcon::NextPage,
@@ -182,6 +237,8 @@ impl UiState {
 
         let root = self.root.unwrap();
         let backend = root.global::<Backend>();
+        backend.set_rom_select_has_previous(has_previous);
+        backend.set_rom_select_has_next(has_next);
         backend.set_rom_select_list(files);
         self.rom_select_update_path();
 
@@ -242,7 +299,10 @@ impl UiState {
             kvs::keys::LAST_ROM_PATH.set(&path);
             let root = self.root.unwrap();
             let backend = root.global::<Backend>();
-            backend.set_rom_select_list(ModelRc::default());
+            self.rom_select_timer.stop();
+            self.rom_select_clear_list();
+            self.rom_select_page_first = None;
+            self.rom_select_page_last = None;
             backend.set_rom_select_progress(0.0);
             backend.set_rom_select_is_loading(true);
             worker::send(worker::Message::RunRomFile(path));
@@ -252,6 +312,7 @@ impl UiState {
     }
 
     pub fn rom_select_set_error(&mut self, error: String) {
+        self.rom_select_timer.stop();
         let root = self.root.unwrap();
         let backend = root.global::<Backend>();
         backend.set_rom_select_is_loading(false);

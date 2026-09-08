@@ -30,7 +30,7 @@ export component RomSelectScreen inherits ScreenBase {
                 Global.set-screen(ScreenId.MainMenu);
                 accept
             } else if (event.text == "b" && !event.repeat) {
-                Backend.rom-select-is-loading = Backend.rom-select-up();
+                Backend.rom-select-up();
                 accept
             } else {
                 reject
@@ -54,7 +54,11 @@ export component RomSelectScreen inherits ScreenBase {
                     x: 0px;
                     width: scroll-bar.x;
                     model: Backend.rom-select-list;
-                    wrap: true;
+                    wrap: !Backend.rom-select-scroll;
+                    auto-continue: Backend.rom-select-scroll;
+                    has-previous: Backend.rom-select-has-previous;
+                    has-next: Backend.rom-select-has-next;
+                    page-requested(next) => { Backend.rom-select-page(next); }
                     disabled: Backend.rom-select-is-loading || has-error;
                     on-item-selected(i) => {
                         Backend.rom-select-index = i;
@@ -74,12 +78,16 @@ export component RomSelectScreen inherits ScreenBase {
                     width: scrollbar-width;
                     height: parent.height - 4px;
                     inner := Rectangle {
-                        y: (-list.viewport-y / list.viewport-height) * parent.height;
+                        y: (-list.viewport-y / max(1px, list.viewport-height)) * parent.height;
                         width: 100%;
-                        height: (list.height / list.viewport-height) * parent.height;
+                        height: (list.height / max(1px, list.viewport-height)) * parent.height;
                         background: black;
                     }
                 }
+            }
+
+            Text {
+                text: Backend.rom-select-scroll ? "Up/Down: scroll" : "Left/Right or L/R: page";
             }
 
             HorizontalLayout {

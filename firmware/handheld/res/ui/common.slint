@@ -108,6 +108,10 @@ export global Backend {
     callback setup-complete();
     callback main-menu-run-cartridge();
     callback main-menu-load-rom();
+    in property <bool> rom-select-scroll: false;
+    in property <bool> rom-select-has-previous: false;
+    in property <bool> rom-select-has-next: false;
+    callback rom-select-page(bool); // true = next
     callback rom-select-selected(int) -> bool;
     callback rom-select-focused(int);
     callback rom-select-up() -> bool;

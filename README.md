@@ -52,3 +52,27 @@ Unless otherwise specified:
 * PCB (schematic and layout), mechanical, and hardware design files are licensed under the CERN Open Hardware License Version 2 - Strongly Reciprocal (`CERN-OHL-S-2.0`)
 
 At a high level, this means that you can copy, share, and modify the source code, as long as you provide proper attribution and share your source code / design files with the same license. However, the "Game Bub" name and logo are trademarked, and you may not use them for your product without permission.
+
+## ROM 列表编译选项
+
+在 `firmware/handheld` 中编译（下面以 rev4 为例）：
+
+```sh
+# 默认：上下选择；左右键或 L/R 翻页，也可选择 Previous/Next page 条目
+./build_fusion_pixel_full.sh --release --features=rev4
+
+# 滚动：上下选择，到当前批次边界时自动加载前／后一批
+./build_fusion_pixel_full.sh --release --features=rev4,rom-list-scroll
+```
+
+滚动模式不显示翻页条目，列表首尾停止；跨批次会短暂显示 Loading。
+两种模式都支持 A 打开、B 返回上级目录及恢复上次选中的文件。
+
+两种模式共用有界目录扫描：每批最多 32 个文件／目录，扫描堆最多保留
+33 个候选；UI 最多 35 行（含上级目录及翻页条目）。加载前清空旧模型，
+不缓存或追加历史批次，因此列表内存不会随目录条目总数增长。
+文件名保持完整用于打开文件，显示宽度限制为 270px；全量中文字库覆盖文本
+仍只在编译时使用。此约束避免全目录加载导致的 OOM；设备整体剩余堆、
+渲染缓存和长期运行仍需实机压力测试确认。
+
+回归及内存测试见 [ROM selector host checks](firmware/handheld/tests/rom-selector-host/README.md)。

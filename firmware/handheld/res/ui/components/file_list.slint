@@ -66,6 +66,13 @@ export component FileListViewBase inherits ListView {
     callback current-item-changed(current-item: int);
 
     public function set-current-item(index: int) {
+        if index == -1 {
+            current-item = -1;
+            focus-item = 0;
+            root.viewport-y = 0;
+            has-item-been-selected = false;
+            return;
+        }
         if index < 0 || index >= model.length || index == root.current-item {
             return;
         }
@@ -76,7 +83,7 @@ export component FileListViewBase inherits ListView {
         current-item-changed(current-item);
     }
 
-    private property <length> item-height: self.viewport-height / self.model.length;
+    private property <length> item-height: self.viewport-height / max(1, self.model.length);
     private property <int> into-view-item: 0;
     private property <length> into-view-item-y: root.item-y(root.into-view-item);
     private property <length> current-item-y: root.item-y(root.focus-item);
@@ -172,6 +179,9 @@ export component FileListViewBase inherits ListView {
     }
 
     protected function set-focus-item(index: int) {
+        if root.model.length == 0 {
+            return;
+        }
         if wrap {
             focus-item = mod(index, root.model.length);
         } else {
@@ -190,6 +200,10 @@ export component FileListViewBase inherits ListView {
 export component FileListView inherits FileListViewBase {
     in property <bool> disabled: false;
     callback on-item-selected(/* selected-item */ int);
+    in property <bool> auto-continue: false;
+    in property <bool> has-previous: false;
+    in property <bool> has-next: false;
+    callback page-requested(bool);
 
     forward-focus: i-focus-scope;
 
@@ -198,14 +212,28 @@ export component FileListView inherits FileListViewBase {
             if (disabled) {
                 return reject;
             } else if (event.text == Key.UpArrow) {
+                if root.auto-continue && root.current-item == 0 && root.has-previous {
+                    root.page-requested(false);
+                    return accept;
+                }
                 root.focus-up();
                 root.select-focus-item();
                 return accept;
             } else if (event.text == Key.DownArrow) {
+                if root.auto-continue && root.current-item == root.model.length - 1 && root.has-next {
+                    root.page-requested(true);
+                    return accept;
+                }
                 root.focus-down();
                 root.select-focus-item();
                 return accept;
-            } else if (event.text == "a" && !event.repeat) {
+            } else if (!root.auto-continue && (event.text == Key.LeftArrow || event.text == "l")) {
+                root.page-requested(false);
+                return accept;
+            } else if (!root.auto-continue && (event.text == Key.RightArrow || event.text == "r")) {
+                root.page-requested(true);
+                return accept;
+            } else if (event.text == "a" && !event.repeat && root.model.length > 0) {
                 root.on-item-selected(root.current-item);
                 return accept;
             }

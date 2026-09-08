@@ -6,7 +6,8 @@ use std::{
 };
 
 /// Bound the amount of directory data retained while building the ROM selector model.
-pub const PAGE_SIZE: usize = 128;
+// Shared by button paging and scrolling; never append pages to the UI model.
+pub const PAGE_SIZE: usize = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RomListEntry {
@@ -207,6 +208,7 @@ mod tests {
     use std::{
         fs::{self, File},
         path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -218,8 +220,10 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
+            static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+            let id = NEXT_ID.fetch_add(1, AtomicOrdering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "gamebub-rom-list-test-{}-{nonce}",
+                "gamebub-rom-list-test-{}-{nonce}-{id}",
                 std::process::id()
             ));
             fs::create_dir(&path).unwrap();
@@ -253,7 +257,10 @@ mod tests {
 
         assert_eq!(page.entries.len(), PAGE_SIZE);
         assert_eq!(page.entries[0].name, "file-0000.gba");
-        assert_eq!(page.entries[PAGE_SIZE - 1].name, "file-0127.gba");
+        assert_eq!(
+            page.entries[PAGE_SIZE - 1].name,
+            format!("file-{:04}.gba", PAGE_SIZE - 1)
+        );
         assert!(!page.has_previous);
         assert!(page.has_next);
     }
@@ -268,7 +275,10 @@ mod tests {
 
         assert_eq!(page.entries.len(), PAGE_SIZE);
         assert_eq!(page.entries[0].name, "file-000000.gba");
-        assert_eq!(page.entries[PAGE_SIZE - 1].name, "file-000127.gba");
+        assert_eq!(
+            page.entries[PAGE_SIZE - 1].name,
+            format!("file-{:06}.gba", PAGE_SIZE - 1)
+        );
         assert!(page.has_next);
     }
 
@@ -291,7 +301,7 @@ mod tests {
             RomListFocus::Last,
         );
 
-        assert_eq!(second.entries[0].name, "file-0128.gba");
+        assert_eq!(second.entries[0].name, format!("file-{:04}.gba", PAGE_SIZE));
         assert_eq!(first.entries, previous.entries);
         assert_eq!(second.focus, RomListFocus::First);
         assert_eq!(previous.focus, RomListFocus::Last);
@@ -302,7 +312,7 @@ mod tests {
         let all_files = files(PAGE_SIZE * 3);
         let saved = all_files
             .iter()
-            .find(|entry| entry.name == "file-0150.gba")
+            .find(|entry| entry.name == format!("file-{:04}.gba", PAGE_SIZE + 22))
             .unwrap()
             .clone();
         let page = select_entries(
@@ -380,11 +390,71 @@ mod tests {
 
         let saved = read_rom_list_page(
             &directory.0,
-            RomListPageRequest::ForName("rom-0130.gba".into()),
+            RomListPageRequest::ForName(format!("rom-{:04}.gba", PAGE_SIZE + 2)),
         )
         .unwrap();
-        assert_eq!(saved.entries[0].name, "rom-0130.gba");
+        assert_eq!(
+            saved.entries[0].name,
+            format!("rom-{:04}.gba", PAGE_SIZE + 2)
+        );
         assert_eq!(saved.focus, RomListFocus::Saved);
+    }
+
+    #[test]
+    fn repeated_bidirectional_navigation_does_not_skip_long_cjk_names() {
+        let directory = TempDirectory::new();
+        // Long UTF-8 names exercise filename allocation as well as page boundaries.
+        let prefix = "中文游戏".repeat(18);
+        let count = PAGE_SIZE * 5 + 3;
+        for index in 0..count {
+            File::create(directory.0.join(format!("{prefix}-{index:04}.gba"))).unwrap();
+        }
+        for _ in 0..3 {
+            let mut request = RomListPageRequest::First;
+            let mut seen = 0;
+            let last = loop {
+                let page = read_rom_list_page(&directory.0, request).unwrap();
+                assert!(page.entries.len() <= PAGE_SIZE);
+                for entry in &page.entries {
+                    assert_eq!(entry.name, format!("{prefix}-{seen:04}.gba"));
+                    seen += 1;
+                }
+                let cursor = page.entries.last().unwrap().clone();
+                if !page.has_next {
+                    break page.entries.first().unwrap().clone();
+                }
+                request = RomListPageRequest::After(cursor);
+            };
+            assert_eq!(seen, count);
+            let mut cursor = last;
+            let mut expected = count - 3;
+            while expected > 0 {
+                let page =
+                    read_rom_list_page(&directory.0, RomListPageRequest::Before(cursor)).unwrap();
+                assert!(page.entries.len() <= PAGE_SIZE);
+                for entry in page.entries.iter().rev() {
+                    expected -= 1;
+                    assert_eq!(entry.name, format!("{prefix}-{expected:04}.gba"));
+                }
+                cursor = page.entries.first().unwrap().clone();
+                assert_eq!(page.has_previous, expected > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_exact_page_directories_have_no_next_page() {
+        let directory = TempDirectory::new();
+        let empty = read_rom_list_page(&directory.0, RomListPageRequest::First).unwrap();
+        assert!(empty.entries.is_empty());
+        assert!(!empty.has_previous && !empty.has_next);
+        let page = select_entries(
+            files(PAGE_SIZE).into_iter(),
+            Selection::First,
+            RomListFocus::Saved,
+        );
+        assert_eq!(page.entries.len(), PAGE_SIZE);
+        assert!(!page.has_previous && !page.has_next);
     }
 
     #[test]
