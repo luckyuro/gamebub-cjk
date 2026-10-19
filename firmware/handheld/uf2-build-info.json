@@ -1,0 +1,68 @@
+{
+  "version": "1.0.2-fusionpixel.1",
+  "source_commit": "cfce527650e360d027e687694aa739b9e89ef981",
+  "upstream_commit": "ce607713c7dcd87fe42d5c0de5d4be040e61a47f",
+  "built_at": "2026-10-19T13:36:32.176343+00:00",
+  "target": "xtensa-esp32s3-espidf",
+  "profile": "release",
+  "hardware_revision": 4,
+  "esp_idf": "v5.4.3",
+  "rustc": "rustc 1.97.0-nightly (8ea53bcd7 2026-07-08) (1.97.0.0)",
+  "font": {
+    "name": "Fusion Pixel 12px Prop zh_hans",
+    "glyphs": 36558,
+    "packed_bitmap_bytes": 551744
+  },
+  "system_data": {
+    "source_url": "https://github.com/elipsitz/gamebub/releases/download/v1.0.2/gamebub-rev4_v1.0.2.uf2",
+    "source_commit": "e779b7cfdef957e6ed8833d3d0f1c8b2f2b4707d",
+    "source_uf2_sha256": "9019356bd14f7e0a155a447764f34cd5ddeb2a67b2dcdaa3fdf19df504999de6",
+    "bytes": 2097152,
+    "sha256": "7114f597588fdcfba320dad5613a47ccf16a481dd997897ab696e6209cb254ba",
+    "flash_start": "0x600000",
+    "flash_end_exclusive": "0x800000"
+  },
+  "verification": {
+    "core_and_directory_tests_passed": 23,
+    "uf2_unit_tests_passed": 2,
+    "production_dfu_parser_passed": true,
+    "partition_payload_round_trip_passed": true,
+    "esp_image_checksum_and_sha256_passed": true,
+    "ui_batches_per_mode": 300,
+    "scroll_down_key_events": 9600,
+    "paged_live_bytes_growth_after_warmup": 32,
+    "scroll_live_bytes_growth_after_warmup": 0,
+    "physical_hardware_tested": false
+  },
+  "artifacts": [
+    {
+      "mode": "paged",
+      "features": [
+        "rev4"
+      ],
+      "file": "gamebub-cjk-rev4-paged.uf2",
+      "bytes": 11542528,
+      "sha256": "922aa4e4954eb4c3ce328c673fae7f23d1c087da5dee3f8f982320e69a6f25a9",
+      "application_bytes": 3670128,
+      "application_sha256": "2115e736c1e30086b6b8c6d2b41cb20da705ae9fe6a98adf97720e9c6878cfc4",
+      "elf_sha256": "858bc3223113af94751d491e0ac6d450d3d392b3723487428c3ce3d287a881aa"
+    },
+    {
+      "mode": "scroll",
+      "features": [
+        "rev4",
+        "rom-list-scroll"
+      ],
+      "file": "gamebub-cjk-rev4-scroll.uf2",
+      "bytes": 11542528,
+      "sha256": "3d7f658ed5e791aa301f423b14d94d08cf2f3a2e61428b3cead025630cd41a55",
+      "application_bytes": 3670048,
+      "application_sha256": "4baf72bea93fec18bdd7573dd9061bf11ffb277373379047aae7f120c0989636",
+      "elf_sha256": "c576184f78e7f65972188ef50f354b481f9b85f0c4a4141e3f491a3dab70dd7c"
+    }
+  ],
+  "default_alias": {
+    "file": "gamebub-cjk-rev4.uf2",
+    "mode": "paged"
+  }
+}

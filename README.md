@@ -87,7 +87,9 @@ At a high level, this means that you can copy, share, and modify the source code
 包含匹配的 FPGA 核心及 BIOS 资源。不要沿用旧版仅含主程序的 UF2 打包方式。
 
 ```sh
-espflash save-image --chip esp32s3 path/to/handheld path/to/application.bin
+espflash save-image --chip esp32s3 --flash-size 8mb --flash-freq 80mhz \
+  --partition-table firmware/handheld/partitions.csv --target-app-partition factory \
+  path/to/handheld path/to/application.bin
 python3 firmware/handheld/make_uf2.py path/to/application.bin path/to/output.uf2 \
   --system-data path/to/system-data-v1.0.2.bin
 ```

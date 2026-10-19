@@ -47,8 +47,8 @@ Apple Silicon host, 360×240 UI, Slint 1.12.1, firmware bit-packed font patch:
 
 | Check | Live bytes after warm-up | Maximum live bytes after warm-up | Peak bytes including temporary allocations |
 | --- | ---: | ---: | ---: |
-| Button paging, 300 batches | 132188 | 132220 | 161500 |
-| Scrolling, 300 batches | 132362 | 132362 | 167011 |
+| Button paging, 300 batches | 132531 | 132563 | 161843 |
+| Scrolling, 300 batches | 132705 | 132705 | 167354 |
 
 The lazy directory scan retained 48288 bytes and peaked at 51972 bytes for both
 1,000 and 100,000 synthetic long filenames; dropping the page returned the Rust
