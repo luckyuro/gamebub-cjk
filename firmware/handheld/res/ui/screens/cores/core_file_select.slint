@@ -9,6 +9,10 @@ export component CoreFileSelect {
 
     forward-focus: list;
 
+    init => {
+        list.set-current-item(Backend.core-file-select-index);
+    }
+
     // TODO: correctly label new item when the list changes
 
     // Hack to call set-current-item when the backend forces a new item.

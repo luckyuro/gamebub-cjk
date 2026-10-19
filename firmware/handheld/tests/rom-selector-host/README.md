@@ -26,7 +26,9 @@ the firmware's exact coverage-text removal and bitmap packing code.
 Checks cover B preserving the in-flight flag, blocked inputs not queueing more
 work, immediate release of old model rows, 300 batches of 255-character filenames,
 backward selection of the last file, cancellation of the selection timer on error,
-and navigation of an empty directory. Scroll mode sends approximately 9,600
+navigation of an empty directory, Home cancellation during scans/timers, ignored
+late replies, launch input gating, and saved-file/directory navigation using real
+temporary files. Scroll mode sends approximately 9,600
 Down key events and renders between them. The allocator records live requested
 bytes and the maximum since warm-up, with a bounded growth assertion. The lazy
 scanner also compares 1,000 and 100,000 long-name entries and checks all its
@@ -39,7 +41,7 @@ size larger than the exact-sized `to_string()` filenames used by the filesystem
 reader. Real filesystem filtering and bidirectional scanning are covered by the
 separate ten directory tests.
 
-## Recorded rebase verification (2026-10-19)
+## Recorded review verification (2026-10-19)
 
 Apple Silicon host, 360×240 UI, Slint 1.12.1, firmware bit-packed font patch:
 
@@ -58,3 +60,9 @@ Review fixes: preserve the backend loading flag when B returns to the parent;
 reject selected/up callbacks during loading; reset the old FileListModel synchronously
 before replacing it, including when launching a core; cancel the selection timer
 when an error arrives or a core file starts loading.
+
+Set `GAMEBUB_SIM_SCREENSHOT=/absolute/path/screen.ppm` to capture the first
+360×240 frame, including the selected Chinese filename and paging hints.
+The review also fixed initial focus when a page arrives before the file selector
+component is created. CoreManager fault simulation is documented in
+[core-host](../core-host/README.md).

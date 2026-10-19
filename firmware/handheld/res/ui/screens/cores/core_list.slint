@@ -69,6 +69,7 @@ export component CoreList {
 
             i-list := ListViewBase {
                 num-items: cores.length;
+                disabled: root.is-loading;
                 wrap: true;
 
                 for item[index] in cores: child-items := CoreListItem {

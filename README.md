@@ -79,3 +79,23 @@ At a high level, this means that you can copy, share, and modify the source code
 渲染缓存和长期运行仍需实机压力测试确认。
 
 回归及内存测试见 [Core file selector host checks](firmware/handheld/tests/rom-selector-host/README.md)。
+
+### UF2 打包
+
+新版固件必须同时更新主程序与匹配的 `system_data` 分区。当前基于上游
+`v1.0.2`（`e779b7c`），使用该版本官方 rev4 UF2 中的完整 2 MiB 系统数据，
+包含匹配的 FPGA 核心及 BIOS 资源。不要沿用旧版仅含主程序的 UF2 打包方式。
+
+```sh
+espflash save-image --chip esp32s3 path/to/handheld path/to/application.bin
+python3 firmware/handheld/make_uf2.py path/to/application.bin path/to/output.uf2 \
+  --system-data path/to/system-data-v1.0.2.bin
+```
+
+`gamebub-cjk-rev4-paged.uf2` 为按键翻页版，
+`gamebub-cjk-rev4-scroll.uf2` 为连续滚动版；
+`gamebub-cjk-rev4.uf2` 与分页版相同。构建来源和校验值见
+`firmware/handheld/uf2-build-info.json` 与根目录 `SHA256SUMS`。
+两种 UF2 仅写入主程序和系统数据分区，不包含 NVS 或 DFU 分区。
+
+核心生命周期及故障模拟见 [Core host checks](firmware/handheld/tests/core-host/README.md)。

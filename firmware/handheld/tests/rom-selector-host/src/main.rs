@@ -1,5 +1,5 @@
-//! Headless integration/stress check using the real UI and ROM selector callbacks.
-//! Hardware, worker I/O and KVS are replaced; rendering and input are real Slint.
+//! Headless integration/stress check using the real UI and core file selector callbacks.
+//! Hardware, worker I/O and core metadata are replaced; rendering and input are real Slint.
 use slint::platform::{
     software_renderer::{
         LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel,
@@ -65,7 +65,11 @@ mod device {
     pub struct Device;
 }
 mod core {
-    pub struct CoreListEntry { pub id: String, pub name: String, pub author: String }
+    pub struct CoreListEntry {
+        pub id: String,
+        pub name: String,
+        pub author: String,
+    }
 }
 mod worker {
     use super::*;
@@ -129,7 +133,10 @@ mod ui {
             }
             pub fn first(&mut self) {
                 self.cores_file_select_begin("ROM".into(), self.core_file_select_directory.clone());
-                crate::worker::send(crate::worker::Message::CoreFileList { path: self.core_file_select_directory.clone(), page: crate::rom_list::RomListPageRequest::First });
+                crate::worker::send(crate::worker::Message::CoreFileList {
+                    path: self.core_file_select_directory.clone(),
+                    page: crate::rom_list::RomListPageRequest::First,
+                });
             }
         }
         use slint::ComponentHandle;
@@ -162,6 +169,30 @@ fn frame(window: &MinimalSoftwareWindow) {
     slint::platform::update_timers_and_animations();
     window.draw_if_needed(|r| {
         r.render_by_line(&mut Lines([Rgb565Pixel::default(); 360]));
+    });
+}
+fn snapshot(window: &MinimalSoftwareWindow) {
+    let Some(path) = std::env::var_os("GAMEBUB_SIM_SCREENSHOT") else {
+        return;
+    };
+    window.request_redraw();
+    window.draw_if_needed(|renderer| {
+        renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+        let mut pixels = vec![Rgb565Pixel::default(); 360 * 240];
+        renderer.render(&mut pixels, 360);
+        let mut ppm = b"P6\n360 240\n255\n".to_vec();
+        for pixel in pixels {
+            let r = ((pixel.0 >> 11) & 31) as u8;
+            let g = ((pixel.0 >> 5) & 63) as u8;
+            let b = (pixel.0 & 31) as u8;
+            ppm.extend_from_slice(&[
+                (r << 3) | (r >> 2),
+                (g << 2) | (g >> 4),
+                (b << 3) | (b >> 2),
+            ]);
+        }
+        std::fs::write(path, ppm).unwrap();
+        renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
     });
 }
 fn key(window: &MinimalSoftwareWindow, text: slint::SharedString) {
@@ -220,14 +251,34 @@ fn main() {
     let state = ui::state::UiState::fixture(&root);
     root.invoke_set_screen(ui::slint::ScreenId::Cores);
     frame(&window);
-    assert!(matches!(worker::take(), Some(worker::Message::FetchCoreList)));
+    assert!(matches!(
+        worker::take(),
+        Some(worker::Message::FetchCoreList)
+    ));
     let backend = root.global::<ui::slint::Backend>();
+    state.borrow_mut().cores_list(vec![core::CoreListEntry {
+        id: "Game-Bub.GBA".into(),
+        name: "Game Boy Advance".into(),
+        author: "Game Bub".into(),
+    }]);
+    frame(&window);
+    key(&window, "a".into());
+    assert!(matches!(worker::take(), Some(worker::Message::RunCore(id)) if id == "Game-Bub.GBA"));
+    key(&window, "b".into());
+    key(&window, "a".into());
+    backend.invoke_core_run("Game-Bub.GBA".into());
+    assert!(
+        worker::take().is_none(),
+        "core launch allowed overlapping input"
+    );
+    assert_eq!(backend.get_core_subscreen(), ui::slint::CoreSubscreen::List);
     state.borrow_mut().first();
     assert!(matches!(
         worker::take(),
         Some(worker::Message::CoreFileList { .. })
     ));
     finish(&state, &window, 0, 10_000, rom_list::RomListFocus::First);
+    snapshot(&window);
 
     // B must keep loading true and suppress further actions until the response.
     key(&window, "b".into());
@@ -357,7 +408,108 @@ fn main() {
     key(&window, "a".into());
     frame(&window);
     assert!(worker::take().is_none());
-    println!(
-        "navigation, input gating, backward focus, empty/error and bounded-heap checks passed"
+    // Home cancels a pending scan; its late page/error must not reopen or mutate the selector.
+    state.borrow_mut().first();
+    worker::take().unwrap();
+    frame(&window);
+    key(&window, "Home".into());
+    assert!(matches!(
+        worker::take(),
+        Some(worker::Message::CoreFileCancelled)
+    ));
+    assert_eq!(backend.get_core_subscreen(), ui::slint::CoreSubscreen::List);
+    finish(&state, &window, 0, 100, rom_list::RomListFocus::First);
+    state
+        .borrow_mut()
+        .cores_file_select_set_error("late read error".into());
+    assert_eq!(backend.get_core_file_select_list().row_count(), 0);
+    assert_eq!(backend.get_core_file_select_error(), "");
+    assert_eq!(backend.get_core_file_select_index(), -1);
+    assert!(!backend.get_core_file_select_is_loading());
+
+    // Home also cancels a page's deferred selection timer.
+    state.borrow_mut().first();
+    worker::take().unwrap();
+    state
+        .borrow_mut()
+        .cores_file_select_list(page(0, 32, rom_list::RomListFocus::First));
+    backend.set_core_subscreen(ui::slint::CoreSubscreen::List);
+    backend.invoke_core_file_select_cancel();
+    assert!(matches!(
+        worker::take(),
+        Some(worker::Message::CoreFileCancelled)
+    ));
+    frame(&window);
+    assert_eq!(backend.get_core_file_select_index(), -1);
+
+    // Exercise real directory reads, saved selection and directory entry/return.
+    let dir = std::env::temp_dir().join(format!("gamebub-ui-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("child")).unwrap();
+    for i in 0..70 {
+        std::fs::write(dir.join(format!("中文游戏-{i:03}.gba")), b"test").unwrap();
+    }
+    let saved = "中文游戏-050.gba";
+    state
+        .borrow_mut()
+        .cores_file_select_begin("ROM".into(), dir.join(saved));
+    let saved_page = rom_list::read_file_list_page(
+        &dir,
+        rom_list::RomListPageRequest::ForName(saved.into()),
+        &[".gba"],
+    )
+    .unwrap();
+    state.borrow_mut().cores_file_select_list(saved_page);
+    frame(&window);
+    frame(&window);
+    let index = backend.get_core_file_select_index();
+    assert_eq!(
+        backend
+            .get_core_file_select_list()
+            .row_data(index as usize)
+            .unwrap()
+            .name,
+        saved
     );
+    key(&window, "a".into());
+    let selected = worker::take();
+    assert!(
+        matches!(&selected, Some(worker::Message::CoreFileSelected(path)) if *path == dir.join(saved)),
+        "saved selection emitted {selected:?}; backend index={index}"
+    );
+
+    state
+        .borrow_mut()
+        .cores_file_select_begin("ROM".into(), dir.clone());
+    let first = rom_list::read_file_list_page(&dir, rom_list::RomListPageRequest::First, &[".gba"])
+        .unwrap();
+    state.borrow_mut().cores_file_select_list(first);
+    frame(&window);
+    frame(&window);
+    key(&window, "a".into());
+    let child = match worker::take().unwrap() {
+        worker::Message::CoreFileList {
+            path,
+            page: rom_list::RomListPageRequest::First,
+        } => path,
+        other => panic!("unexpected directory selection: {other:?}"),
+    };
+    assert_eq!(child, dir.join("child"));
+    state.borrow_mut().cores_file_select_list(
+        rom_list::read_file_list_page(&child, rom_list::RomListPageRequest::First, &[".gba"])
+            .unwrap(),
+    );
+    frame(&window);
+    frame(&window);
+    key(&window, "b".into());
+    assert!(
+        matches!(worker::take(), Some(worker::Message::CoreFileList { path, page: rom_list::RomListPageRequest::ForName(name) }) if path == dir && name == "child")
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    state
+        .borrow_mut()
+        .cores_file_select_set_error("directory removed".into());
+    assert!(!backend.get_core_file_select_is_loading());
+    key(&window, "b".into());
+    assert_eq!(backend.get_core_file_select_error(), "");
+    println!("navigation, cancellation, late replies, real filesystem, saved focus, empty/error and bounded-heap checks passed");
 }

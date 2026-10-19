@@ -16,6 +16,7 @@ export component CoresScreen inherits ScreenBase {
 
     init => {
         Backend.core-file-select-list = [];
+        Backend.core-file-select-is-loading = false;
         Backend.core-file-select-label = "";
         if Backend.core-list.length == 0 {
             Backend.core-list-fetch();
@@ -29,6 +30,7 @@ export component CoresScreen inherits ScreenBase {
 
     if Backend.core-subscreen == CoreSubscreen.List: CoreList {
         cores: root.cores;
+        is-loading: root.cores.length == 0 || Backend.core-file-select-is-loading;
         width: 100%;
         height: 100%;
 

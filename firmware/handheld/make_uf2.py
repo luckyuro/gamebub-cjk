@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wrap a Game Bub ESP32-S3 application image in the UF2 format."""
+"""Bundle a Game Bub ESP32-S3 application and matching system data as UF2."""
 
 import argparse
 import hashlib
@@ -19,6 +19,9 @@ TAG_DEVICE_TYPE = 0xC8A729
 TAG_GIT_COMMIT = 0x8A4E54
 PAYLOAD_SIZE = 256
 BLOCK_SIZE = 512
+FLASH_SECTOR_SIZE = 4096
+SYSTEM_DATA_ADDRESS = 0x600000
+SYSTEM_DATA_SIZE = 2 * 1024 * 1024
 
 
 def extension_tag(tag_type: int, payload: bytes) -> bytes:
@@ -42,16 +45,24 @@ def make_uf2(
     hardware_major: int,
     product: int,
     commit: str,
+    system_data: bytes,
 ) -> bytes:
-    if base_address % PAYLOAD_SIZE:
-        raise ValueError("base address must be 256-byte aligned")
+    if base_address != 0x100000:
+        raise ValueError("application must start at the factory partition (0x100000)")
+    if not image:
+        raise ValueError("application image is empty")
+    if len(system_data) != SYSTEM_DATA_SIZE:
+        raise ValueError("system data must fill the 2 MiB system_data partition")
     if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
         raise ValueError("commit must be a 40-character hexadecimal Git hash")
 
     padded_image = image.ljust(
-        (len(image) + PAYLOAD_SIZE - 1) // PAYLOAD_SIZE * PAYLOAD_SIZE, b"\0"
+        (len(image) + FLASH_SECTOR_SIZE - 1) // FLASH_SECTOR_SIZE * FLASH_SECTOR_SIZE, b"\0"
     )
-    total_blocks = len(padded_image) // PAYLOAD_SIZE
+    if base_address + len(padded_image) > SYSTEM_DATA_ADDRESS:
+        raise ValueError("application overlaps system_data partition")
+    segments = [(base_address, padded_image), (SYSTEM_DATA_ADDRESS, system_data)]
+    total_blocks = sum(len(data) // PAYLOAD_SIZE for _, data in segments)
     device = b"bub!" + bytes([0, 0, hardware_major, product])
     extensions = (
         extension_tag(TAG_DEVICE_TYPE, device)
@@ -63,26 +74,21 @@ def make_uf2(
 
     flags = FLAG_FAMILY_ID_PRESENT | FLAG_EXTENSION_TAGS_PRESENT
     output = bytearray()
-    for block_number in range(total_blocks):
-        address = base_address + block_number * PAYLOAD_SIZE
-        payload = padded_image[
-            block_number * PAYLOAD_SIZE : (block_number + 1) * PAYLOAD_SIZE
-        ]
-        header = struct.pack(
-            "<8I",
-            MAGIC_START0,
-            MAGIC_START1,
-            flags,
-            address,
-            PAYLOAD_SIZE,
-            block_number,
-            total_blocks,
-            FAMILY_ID_ESP32_S3,
-        )
-        block = header + payload + extensions
-        block = block.ljust(BLOCK_SIZE - 4, b"\0") + struct.pack("<I", MAGIC_END)
-        assert len(block) == BLOCK_SIZE
-        output.extend(block)
+    block_number = 0
+    for base, data in segments:
+        for offset in range(0, len(data), PAYLOAD_SIZE):
+            address = base + offset
+            payload = data[offset : offset + PAYLOAD_SIZE]
+            header = struct.pack(
+                "<8I",
+                MAGIC_START0, MAGIC_START1, flags, address, PAYLOAD_SIZE,
+                block_number, total_blocks, FAMILY_ID_ESP32_S3,
+            )
+            block = header + payload + extensions
+            block = block.ljust(BLOCK_SIZE - 4, b"\0") + struct.pack("<I", MAGIC_END)
+            assert len(block) == BLOCK_SIZE
+            output.extend(block)
+            block_number += 1
     return bytes(output)
 
 
@@ -90,6 +96,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path, help="ESP32 application .bin")
     parser.add_argument("output", type=Path, help="output .uf2")
+    parser.add_argument("--system-data", type=Path, required=True,
+                        help="matching 2 MiB system_data image (FPGA cores and BIOS assets)")
     parser.add_argument("--base", type=lambda value: int(value, 0), default=0x100000)
     parser.add_argument(
         "--factory-size",
@@ -106,7 +114,7 @@ def main() -> None:
         parser.error("hardware-major and product must fit in one byte")
 
     image = args.input.read_bytes()
-    padded_size = (len(image) + PAYLOAD_SIZE - 1) // PAYLOAD_SIZE * PAYLOAD_SIZE
+    padded_size = (len(image) + FLASH_SECTOR_SIZE - 1) // FLASH_SECTOR_SIZE * FLASH_SECTOR_SIZE
     if padded_size > args.factory_size:
         parser.error(
             f"image occupies {padded_size} bytes, exceeding the factory partition "
@@ -114,12 +122,17 @@ def main() -> None:
         )
 
     commit = args.commit or current_commit()
-    uf2 = make_uf2(image, args.base, args.hardware_major, args.product, commit)
+    try:
+        uf2 = make_uf2(image, args.base, args.hardware_major, args.product, commit,
+                      args.system_data.read_bytes())
+    except ValueError as error:
+        parser.error(str(error))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(uf2)
     print(
         f"wrote {args.output}: {len(uf2)} bytes, {len(uf2) // BLOCK_SIZE} blocks, "
-        f"flash 0x{args.base:x}..0x{args.base + padded_size:x}, "
+        f"app 0x{args.base:x}..0x{args.base + padded_size:x}, "
+        f"system_data 0x600000..0x800000, "
         f"sha256 {hashlib.sha256(uf2).hexdigest()}"
     )
 

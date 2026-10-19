@@ -187,16 +187,18 @@ impl CoreManager {
     /// Start the process of running a specific core (by ID).
     pub fn run_core(&mut self, id: &str, run_cartridge: bool) {
         log::info!("Run core={id} cart={run_cartridge}");
-        assert!(self.core_info.is_none());
-        assert!(self.stage == Stage::Idle);
+        if self.stage != Stage::Idle || self.core_info.is_some() {
+            log::warn!("Ignoring duplicate core start while {:?}", self.stage);
+            return;
+        }
         let core = match info::get_core(id) {
             Ok(core) => {
                 self.core_info = Some(core);
                 self.core_info.as_ref().unwrap()
             }
             Err(e) => {
-                // TODO show error to user?
                 log::error!("Error loading core '{id}': {e}");
+                ui::send(ui::Message::CoreLoadError(e));
                 return;
             }
         };
@@ -282,10 +284,9 @@ impl CoreManager {
         self.reset_state();
 
         // Power off the DAC
-        Device::lock()
-            .dac
-            .set_power_down(0, true)
-            .expect("DAC power");
+        if let Err(error) = Device::lock().dac.set_power_down(0, true) {
+            log::error!("Failed to power down DAC: {error}");
+        }
 
         // And go back to the boot bitstream
         if let Err(error) = bitstream::program_boot() {
@@ -333,11 +334,15 @@ impl CoreManager {
         {
             let mut device = Device::lock();
             for (i, &x) in request.iter().enumerate() {
-                let _ = device
+                device
                     .fpga
-                    .write_u32(fpga::REG_CMD_HOST_BASE + (4 * i as u32), x);
+                    .write_u32(fpga::REG_CMD_HOST_BASE + (4 * i as u32), x)
+                    .map_err(|e| Other(e.to_string()))?;
             }
-            let _ = device.fpga.write_u32(fpga::REG_CTRL_CMD_HOST, 0b1000);
+            device
+                .fpga
+                .write_u32(fpga::REG_CTRL_CMD_HOST, 0b1000)
+                .map_err(|e| Other(e.to_string()))?;
         }
 
         // Poll for command completion.
@@ -348,7 +353,10 @@ impl CoreManager {
                 return Err(CoreError::CommandTimeout(request[0]));
             }
             let mut device = Device::lock();
-            let status = device.fpga.read_u32(fpga::REG_CTRL_CMD_HOST).unwrap();
+            let status = device
+                .fpga
+                .read_u32(fpga::REG_CTRL_CMD_HOST)
+                .map_err(|e| Other(e.to_string()))?;
             if (status & 0b0011) != 0 {
                 break status;
             }
@@ -363,10 +371,13 @@ impl CoreManager {
                 *x = device
                     .fpga
                     .read_u32(fpga::REG_CMD_HOST_BASE + (4 * i as u32))
-                    .unwrap();
+                    .map_err(|e| Other(e.to_string()))?;
             }
 
-            let _ = device.fpga.write_u32(fpga::REG_CTRL_CMD_HOST, 0);
+            device
+                .fpga
+                .write_u32(fpga::REG_CTRL_CMD_HOST, 0)
+                .map_err(|e| Other(e.to_string()))?;
         }
 
         // Check status.
@@ -380,7 +391,9 @@ impl CoreManager {
     pub fn focus_changed(&mut self, has_focus: bool) {
         {
             let mut device = Device::lock();
-            device.dac.set_power_down(0, !has_focus).expect("DAC power");
+            if let Err(error) = device.dac.set_power_down(0, !has_focus) {
+                log::error!("Failed to change DAC power: {error}");
+            }
             let _ = device
                 .fpga
                 .write_u32(fpga::REG_CTRL_FOCUS, has_focus as u32);
@@ -495,11 +508,10 @@ impl CoreManager {
 
         // Clear loading bar
         ui::send(ui::Message::EnterGame);
-        self.stage = Stage::Running;
-
         // Start core.
         let _ = Device::lock().fpga.write_u32(fpga::REG_CTRL_VIBRATE, 1);
-        let _ = self.run_core_command(&[command::CORE_RUN], &mut [], NOTIFY_TIMEOUT);
+        self.run_core_command(&[command::CORE_RUN], &mut [], NOTIFY_TIMEOUT)?;
+        self.stage = Stage::Running;
         self.focus_changed(true);
         Ok(())
     }
@@ -565,12 +577,12 @@ impl CoreManager {
             self.selected_files[i] = Some(path);
             let mut file = match file {
                 Ok(file) => file,
-                Err(_) if info.optional && info.initialize => {
+                Err(_) if info.optional && !info.user_selected && info.initialize => {
                     log::info!("Failed to open file, clearing");
                     self.clear_file_slot(info, &mut scratch)?;
                     continue;
                 }
-                Err(_) if info.optional => {
+                Err(_) if info.optional && !info.user_selected => {
                     log::info!("Failed to open file, skipping");
                     continue;
                 }
@@ -730,10 +742,11 @@ impl CoreManager {
                 let max_clock =
                     Some(Hertz(info.max_transfer_speed * 1000 * 2).min(MAX_SPI_READ_CLOCK));
                 let command = SpiCommand::new(info.transfer_word_size);
-                let _ = Device::lock()
+                Device::lock()
                     .fpga
-                    .spi_read(max_clock, command, address, data);
-                file.write(data).map_err(|_| {
+                    .spi_read(max_clock, command, address, data)
+                    .map_err(|e| FailedSaveFile(info.label.to_string(), e.to_string()))?;
+                file.write_all(data).map_err(|_| {
                     FailedSaveFile(info.label.to_string(), "Write failed".to_string())
                 })?;
                 address += to_read as u32;
@@ -777,11 +790,11 @@ impl CoreManager {
     /// Called when a file has been selected for the core.
     /// This could be a file or a directory.
     pub fn handle_file_selected(&mut self, path: PathBuf) {
+        let Stage::LoadSelectFile(file_index) = self.stage else {
+            return;
+        };
         if path.is_file() {
             log::info!("File selected: {}", path.display());
-            let Stage::LoadSelectFile(file_index) = self.stage else {
-                panic!()
-            };
 
             // Update settings
             let settings = self.core_settings.as_mut().unwrap();
@@ -793,15 +806,20 @@ impl CoreManager {
             self.next_file_select();
         } else if path.is_dir() {
             self.send_core_file_list(&path, RomListPageRequest::First);
+        } else {
+            ui::send(ui::Message::CoreFileSelectError(
+                "Selected file is no longer accessible. Check the SD card and try again.".into(),
+            ));
         }
     }
 
     /// Called if a file selection is cancelled.
     pub fn cancel_file_select(&mut self) {
-        // TODO support multiple file select (go back to previous file)
+        if !matches!(self.stage, Stage::LoadSelectFile(_)) {
+            return;
+        }
         log::info!("File select cancelled");
-        self.core_info = None;
-        self.stage = Stage::Idle;
+        self.reset_state();
     }
 
     pub fn send_core_file_list(&self, path: &Path, page: RomListPageRequest) {
@@ -836,10 +854,10 @@ impl CoreManager {
             let n = ((len - pos) as usize).min(buf.len());
             let max_clock = Some(Hertz(info.max_transfer_speed * 1000 * 2));
             let command = SpiCommand::new(info.transfer_word_size);
-            let _ =
-                Device::lock()
-                    .fpga
-                    .spi_write(max_clock, command, info.address + pos, &buf[..n]);
+            Device::lock()
+                .fpga
+                .spi_write(max_clock, command, info.address + pos, &buf[..n])
+                .map_err(|e| Other(e.to_string()))?;
             pos += n as u32;
         }
 
