@@ -1,8 +1,8 @@
 {
-  "version": "1.0.2-fusionpixel.2",
-  "source_commit": "c9ad5d67968e2ddd7ef84ea2ef4e246c146dbf0e",
+  "version": "1.0.2-fusionpixel.3",
+  "source_commit": "91d88b4fcd49842e43b219b64b47d689331c0738",
   "upstream_commit": "ce607713c7dcd87fe42d5c0de5d4be040e61a47f",
-  "built_at": "2026-10-20T07:53:46.664293+00:00",
+  "built_at": "2026-10-20T10:25:10.681280+00:00",
   "target": "xtensa-esp32s3-espidf",
   "profile": "release",
   "hardware_revision": 4,
@@ -23,18 +23,21 @@
     "flash_end_exclusive": "0x800000"
   },
   "verification": {
+    "host_tests_passed": 26,
+    "bios_selection_tests_passed": 3,
+    "bios_settings_ui_input_and_rendering_passed": true,
+    "paged_ui_batches": 300,
+    "paged_live_bytes_growth_after_warmup": 0,
+    "directory_tests_passed": 10,
+    "paged_arrow_and_shoulder_boundary_checks_passed": true,
+    "paged_first_and_last_row_visual_checks_passed": true,
     "uf2_unit_tests_passed": 2,
     "production_dfu_parser_passed": true,
+    "production_dfu_blocks_verified": 22528,
     "partition_payload_round_trip_passed": true,
     "esp_image_checksum_and_sha256_passed": true,
-    "ui_batches_per_mode": 300,
-    "scroll_down_key_events": 9600,
-    "paged_live_bytes_growth_after_warmup": 0,
-    "scroll_live_bytes_growth_after_warmup": 0,
-    "physical_hardware_tested": false,
-    "directory_tests_per_mode_passed": 10,
-    "paged_arrow_and_shoulder_boundary_checks_passed": true,
-    "paged_first_and_last_row_visual_checks_passed": true
+    "embedded_version_and_source_commit_passed": true,
+    "physical_hardware_tested": false
   },
   "artifacts": [
     {
@@ -43,18 +46,18 @@
         "rev4"
       ],
       "file": "gamebub-cjk-rev4-paged.uf2",
-      "bytes": 11542528,
-      "sha256": "7f2aa10c73a9298be94ef633d63304b62aca6617d775557ee52a87ea69c10104",
-      "application_bytes": 3670336,
-      "application_sha256": "8a88a1f7506315ea5cf399f275abb3dfd3a0b1ddfc3b2c8a8ac90a2c73315e93",
-      "elf_sha256": "98417ea421424386f1610fff979d25ef747b5d5109527b5aae08a0cec6c99788",
-      "source_commit": "c9ad5d67968e2ddd7ef84ea2ef4e246c146dbf0e",
+      "bytes": 11534336,
+      "sha256": "32ff3d263d3b947d70ffad243101aad83e1d90ca9ced5f7c3587b7ad66b8d708",
+      "application_bytes": 3669456,
+      "application_sha256": "ec32fa87206c73d133634da77480082a826af1c7a80a8ca9ff33b7b7dee4ac30",
+      "elf_sha256": "70483b1fc3324db4bf5afd7bb1ab87260bcfbc54b00a55b9d95d9895ab9c6708",
+      "source_commit": "91d88b4fcd49842e43b219b64b47d689331c0738",
       "source_dirty": false,
-      "built_at": "2026-10-20T07:53:46.664293+00:00",
+      "built_at": "2026-10-20T10:25:10.681280+00:00",
       "entries_per_page": 10,
       "max_ui_rows_including_parent": 11,
       "page_navigation_rows": false,
-      "version": "1.0.2-fusionpixel.2"
+      "version": "1.0.2-fusionpixel.3"
     },
     {
       "mode": "scroll",
@@ -78,5 +81,6 @@
     "file": "gamebub-cjk-rev4.uf2",
     "mode": "paged"
   },
-  "source_dirty": false
+  "source_dirty": false,
+  "verification_scope": "paged firmware built from source_commit"
 }
