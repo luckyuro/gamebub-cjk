@@ -1,4 +1,5 @@
 pub mod background_io;
+pub mod bios;
 
 use std::{
     fs::File,

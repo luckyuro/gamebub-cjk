@@ -56,7 +56,7 @@ At a high level, this means that you can copy, share, and modify the source code
 ## 核心文件列表编译选项
 
 已适配上游 `handheld` 的 CoreManager 架构；各核心按自身配置筛选文件，
-并保留各文件槽上次选择的路径。源码版本为 `1.0.2-fusionpixel.2`。
+并保留各文件槽上次选择的路径。源码版本为 `1.0.2-fusionpixel.3`。
 
 在 `firmware/handheld` 中编译（下面以 rev4 为例）：
 
@@ -101,8 +101,30 @@ python3 firmware/handheld/make_uf2.py path/to/application.bin path/to/output.uf2
 `gamebub-cjk-rev4-scroll.uf2` 为连续滚动版；
 `gamebub-cjk-rev4.uf2` 与分页版相同。构建来源和校验值见
 `firmware/handheld/uf2-build-info.json` 与根目录 `SHA256SUMS`。
-本次 `v1.0.2-fusionpixel.2-paged` Release 单独发布翻页版；
+本次 `v1.0.2-fusionpixel.3-paged` Release 单独发布翻页版，新增 BIOS 检测和加载开关；
 仓库中的滚动版固件仍为 `1.0.2-fusionpixel.1`。
 两种 UF2 仅写入主程序和系统数据分区，不包含 NVS 或 DFU 分区。
 
 核心生命周期及故障模拟见 [Core host checks](firmware/handheld/tests/core-host/README.md)。
+
+### BIOS 检测与加载选择
+
+`Settings → Core: GB / GBC` 和 `Settings → Core: GBA` 增加了
+`Use SD BIOS (off: built-in)` 开关，默认开启，保留原来的自动加载行为。
+关闭后，即使 SD 卡上存在 BIOS，也使用固件自带的替代 BIOS。
+GB / GBC 共用一个开关，GBA 单独设置；设置会保存，在下次启动游戏或卡带时生效。
+
+页面同时显示 SD 卡 BIOS 的检测结果：`Found`（找到且大小符合）、
+`Not found`（未找到）、`Wrong size`（大小不符）或 `Read error`（读取失败）。
+每次进入对应配置页会重新检测；这里只检查文件类型和大小，不校验 BIOS 内容。
+
+| 核心 | SD 卡文件 | 大小 |
+| --- | --- | --- |
+| GB | `/system/gameboy.bios-dmg.bin` | 256 字节 |
+| GBC | `/system/gameboy.bios-cgb.bin` | 2,304 字节 |
+| GBA | `/system/gba.bios.bin` | 16,384 字节 |
+
+上表路径相对于 SD 卡根目录。已有的 GBA 跳过开机动画配置若启用，
+则检测和加载 `/system/gba.bios-fast.bin`（同为 16,384 字节）。
+开启 SD BIOS 时，文件缺失会自动使用内置替代 BIOS，大小不符仍由加载器报错；
+主动关闭时不再弹出 GBA 缺少 BIOS 的提醒。内置替代 BIOS 的游戏兼容性可能与外部 BIOS 不同。

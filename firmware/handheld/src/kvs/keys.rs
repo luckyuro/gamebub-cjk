@@ -21,6 +21,9 @@ pub static GB_IS_DMG: KvsKey<bool> = KvsKey::new_with_default("gb-is-dmg", false
 /// Whether to skip DMG/CGB boot animation
 pub static GB_SKIP_BOOT_ANIM: KvsKey<bool> = KvsKey::new_with_default("gb-no-anim", false);
 
+/// Whether SD-card BIOS files override the bundled GB/CGB replacements.
+pub static GB_USE_SD_BIOS: KvsKey<bool> = KvsKey::new_with_default("gb-sd-bios", true);
+
 /// DMG color palette
 pub static DMG_COLOR_PALETTE: KvsKey<i32> = KvsKey::new_with_default("dmg-colors", 1);
 
@@ -29,6 +32,9 @@ pub static CGB_COLOR_PROFILE: KvsKey<i32> = KvsKey::new_with_default("cgb-colors
 
 /// Whether to skip GBA boot animation.
 pub static GBA_SKIP_BOOT_ANIM: KvsKey<bool> = KvsKey::new_with_default("gba-no-anim", false);
+
+/// Whether the SD-card BIOS overrides the bundled GBA replacement.
+pub static GBA_USE_SD_BIOS: KvsKey<bool> = KvsKey::new_with_default("gba-sd-bios", true);
 
 /// GBA color profile
 pub static GBA_COLOR_PROFILE: KvsKey<i32> = KvsKey::new_with_default("gba-colors", 1);
@@ -53,9 +59,11 @@ pub fn flush_all() {
     DARK_MODE.flush();
     GB_IS_DMG.flush();
     GB_SKIP_BOOT_ANIM.flush();
+    GB_USE_SD_BIOS.flush();
     DMG_COLOR_PALETTE.flush();
     CGB_COLOR_PROFILE.flush();
     GBA_SKIP_BOOT_ANIM.flush();
+    GBA_USE_SD_BIOS.flush();
     GBA_COLOR_PROFILE.flush();
     GBA_ENABLE_GBP.flush();
     STARTUP_ACTION.flush();

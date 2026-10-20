@@ -11,6 +11,7 @@ rom-list-scroll = []
 
 [dependencies]
 log = "0.4"
+time = "0.3.37"
 slint = { version = "=1.12.1", default-features = false, features = ["compat-1-2", "unsafe-single-threaded", "libm", "renderer-software"] }
 
 [build-dependencies]

@@ -43,6 +43,16 @@ unsafe impl GlobalAlloc for CountAlloc {
 }
 #[global_allocator]
 static ALLOC: CountAlloc = CountAlloc;
+#[path = "../../host-kvs.rs"]
+mod kvs;
+mod util {
+    pub mod bios {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/util/bios.rs"
+        ));
+    }
+}
 #[allow(dead_code)]
 mod rom_list {
     include!(concat!(
@@ -63,6 +73,12 @@ mod rom_list {
 }
 mod device {
     pub struct Device;
+    impl Device {
+        pub fn lock() -> Self {
+            Self
+        }
+        pub fn set_datetime(&mut self, _: time::OffsetDateTime) {}
+    }
 }
 mod core {
     pub struct CoreListEntry {
@@ -97,15 +113,22 @@ mod worker {
     }
 }
 mod ui {
+    pub enum Message {
+        Redraw,
+    }
+    pub fn send(_: Message) {}
     pub mod slint {
         slint::include_modules!();
     }
     pub mod state {
-        use super::slint::MainWindow;
+        use super::slint::{
+            MainWindow, ScreenId, SettingDatetime, SettingEntry, SettingType, SettingValue,
+        };
         use crate::{device::Device, rom_list::RomListEntry};
         use std::{cell::RefCell, path::PathBuf, rc::Rc};
         pub struct UiState {
             root: slint::Weak<MainWindow>,
+            settings: settings::SettingsState,
             core_file_select_directory: PathBuf,
             core_file_select_filename: String,
             core_file_select_page_first: Option<RomListEntry>,
@@ -118,10 +141,17 @@ mod ui {
                 "/../../src/ui/state/cores.rs"
             ));
         }
+        mod settings {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../src/ui/state/settings.rs"
+            ));
+        }
         impl UiState {
             pub fn fixture(root: &MainWindow) -> Rc<RefCell<Self>> {
                 let state = Rc::new(RefCell::new(Self {
                     root: root.as_weak(),
+                    settings: Default::default(),
                     core_file_select_directory: "/sdcard/child".into(),
                     core_file_select_filename: String::new(),
                     core_file_select_page_first: None,
@@ -129,6 +159,16 @@ mod ui {
                     core_file_select_timer: Default::default(),
                 }));
                 state.borrow_mut().setup_cores(&state, &mut Device);
+                state.borrow_mut().setup_settings(&state, &mut Device);
+                let state_ = state.clone();
+                root.global::<super::slint::Backend>()
+                    .on_screen_enter(move |screen| {
+                        if screen == ScreenId::Settings {
+                            state_.borrow_mut().on_settings_enter();
+                        }
+                    });
+                root.global::<super::slint::Backend>()
+                    .on_datetime_add(settings::settings_datetime_add);
                 state
             }
             pub fn first(&mut self) {
@@ -586,4 +626,53 @@ fn main() {
     key(&window, "b".into());
     assert_eq!(backend.get_core_file_select_error(), "");
     println!("navigation, cancellation, late replies, real filesystem, saved focus, empty/error and bounded-heap checks passed");
+
+    // Exercise the real settings model and Slint key handling.
+    root.invoke_set_screen(ui::slint::ScreenId::Settings);
+    frame(&window);
+    for (page_index, status_count, suffix) in [(2, 2, "gb-bios"), (3, 1, "gba-bios")] {
+        backend.set_settings_index(page_index);
+        key(&window, "a".into());
+        frame(&window);
+        let entries = backend.get_settings();
+        assert!(entries.row_data(0).unwrap().value.bool_value);
+        for row in 1..=status_count {
+            let entry = entries.row_data(row).unwrap();
+            assert_eq!(entry.r#type, ui::slint::SettingType::Info);
+            assert!(entry.name.contains("BIOS on SD:"));
+        }
+        snapshot(&window, suffix);
+
+        // Toggle off, revisit the page, and check that the model retained it.
+        key(&window, "a".into());
+        frame(&window);
+        assert!(!entries.row_data(0).unwrap().value.bool_value);
+        if page_index == 2 {
+            assert!(!util::bios::Bios::Dmg.use_sd_bios());
+            assert!(!util::bios::Bios::Cgb.use_sd_bios());
+            assert!(util::bios::Bios::Gba.use_sd_bios());
+        } else {
+            assert!(!util::bios::Bios::Gba.use_sd_bios());
+        }
+        for row in 1..=status_count {
+            backend.set_settings_index(row as i32);
+            let previous = entries.row_data(row).unwrap().name;
+            key(&window, "a".into());
+            frame(&window);
+            assert_eq!(entries.row_data(row).unwrap().name, previous);
+            assert!(!entries.row_data(0).unwrap().value.bool_value);
+        }
+        key(&window, "b".into());
+        frame(&window);
+        assert_eq!(backend.get_settings_index(), page_index);
+        key(&window, "a".into());
+        frame(&window);
+        assert!(!backend.get_settings().row_data(0).unwrap().value.bool_value);
+        key(&window, "a".into());
+        frame(&window);
+        assert!(backend.get_settings().row_data(0).unwrap().value.bool_value);
+        key(&window, "b".into());
+        frame(&window);
+    }
+    println!("BIOS settings navigation, independent toggles, read-only status and retained preferences passed");
 }

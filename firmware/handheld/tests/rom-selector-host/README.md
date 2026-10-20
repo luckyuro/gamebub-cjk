@@ -71,6 +71,13 @@ The review also fixed initial focus when a page arrives before the file selector
 component is created. CoreManager fault simulation is documented in
 [core-host](../core-host/README.md).
 
+The executable also includes the production settings model and callbacks. It
+checks the GB/GBC and GBA BIOS pages with real A/B key events, read-only detection
+rows, independent load switches, and retained values after leaving/re-entering a
+page. Only KVS storage is in memory; this does not test flash persistence.
+With `GAMEBUB_SIM_SCREENSHOT` set, sibling `screen.gb-bios.ppm` and
+`screen.gba-bios.ppm` files capture both settings pages.
+
 Button paging also captures a sibling `screen.last.ppm` frame with the last entry
 selected, to check that all ten entries and the parent row fit without scrolling.
 

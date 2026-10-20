@@ -8,7 +8,15 @@ pub mod hal {
 }
 #[path = "../../../src/rom_list.rs"]
 mod rom_list;
+#[path = "../../host-kvs.rs"]
+mod kvs;
 mod util {
+    pub mod bios {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/util/bios.rs"
+        ));
+    }
     pub mod background_io {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),

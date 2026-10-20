@@ -2,7 +2,7 @@ use std::{
     fmt::{Debug, Display},
     fs::File,
     io::{Read, Seek, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use esp_idf_svc::hal::units::Hertz;
@@ -13,6 +13,7 @@ use crate::{
     core::{CoreFile, CoreHandler, CoreInfo},
     device::{drivers::fpga, Device},
     kvs, ui,
+    util::bios::Bios,
 };
 
 use super::{
@@ -161,6 +162,7 @@ pub struct Gba {
     rom_file_size: u32,
     save_type_detector: SaveTypeDetector,
     rtc_state: Option<RtcState>,
+    using_sd_bios: bool,
 }
 
 impl Gba {
@@ -172,14 +174,7 @@ impl Gba {
             rom_file_size: 0,
             save_type_detector: SaveTypeDetector::new(),
             rtc_state: None,
-        }
-    }
-
-    fn get_bios_path() -> &'static str {
-        if kvs::keys::GBA_SKIP_BOOT_ANIM.get().unwrap() {
-            "gba.bios-fast.bin"
-        } else {
-            "gba.bios.bin"
+            using_sd_bios: false,
         }
     }
 
@@ -319,7 +314,9 @@ impl CoreHandler for Gba {
 
     fn get_file_path_override(&mut self, id: u16) -> Option<PathBuf> {
         if id == FILE_BIOS {
-            Some(crate::util::get_system_file_path(Self::get_bios_path()))
+            let path = Bios::Gba.path();
+            self.using_sd_bios = path.starts_with("/sdcard/system");
+            Some(path)
         } else {
             None
         }
@@ -451,13 +448,14 @@ impl CoreHandler for Gba {
                 .write_u32(REG_EMU_CART_CONFIG, EmulatedCartridgeConfig::DISABLED);
         }
 
-        // Warn if using built-in GBA bios
-        if kvs::keys::GBA_BIOS_WARNING.get().unwrap_or(true) {
-            if !Path::new("/sdcard/system/gba.bios.bin").is_file() {
-                ui::send(ui::Message::Notification(ui::Notification::new_long(
-                    "No GBA BIOS provided:\nsome games may have bugs\n(see User Guide)".into(),
-                )));
-            }
+        // Do not warn when the user deliberately selected the bundled BIOS.
+        if kvs::keys::GBA_BIOS_WARNING.get().unwrap_or(true)
+            && Bios::Gba.use_sd_bios()
+            && !self.using_sd_bios
+        {
+            ui::send(ui::Message::Notification(ui::Notification::new_long(
+                "No GBA BIOS provided:\nsome games may have bugs\n(see User Guide)".into(),
+            )));
         }
 
         Ok(())

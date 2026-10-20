@@ -10,6 +10,7 @@ use crate::{
     core::{CoreFile, CoreHandler, CoreInfo},
     device::{drivers::fpga, Device},
     kvs,
+    util::bios::Bios,
 };
 
 use super::{
@@ -235,8 +236,8 @@ impl CoreHandler for Gameboy {
 
     fn get_file_path_override(&mut self, id: u16) -> Option<PathBuf> {
         match id {
-            FILE_BIOS_CGB => Some(crate::util::get_system_file_path("gameboy.bios-cgb.bin")),
-            FILE_BIOS_DMG => Some(crate::util::get_system_file_path("gameboy.bios-dmg.bin")),
+            FILE_BIOS_CGB => Some(Bios::Cgb.path()),
+            FILE_BIOS_DMG => Some(Bios::Dmg.path()),
             _ => None,
         }
     }

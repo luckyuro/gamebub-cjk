@@ -14,6 +14,7 @@ use super::UiState;
 mod settings {
     use crate::kvs::{keys, KvsKey};
     use crate::ui::state::ScreenId;
+    use crate::util::bios::Bios;
 
     pub struct Page {
         pub name: &'static str,
@@ -24,6 +25,10 @@ mod settings {
         Checkbox {
             name: &'static str,
             key: &'static KvsKey<bool>,
+        },
+        BiosStatus {
+            name: &'static str,
+            bios: Bios,
         },
         List {
             name: &'static str,
@@ -83,6 +88,18 @@ mod settings {
         name: "Core: GB / GBC",
         entries: &[
             Entry::Checkbox {
+                name: "Use SD BIOS (off: built-in)",
+                key: &keys::GB_USE_SD_BIOS,
+            },
+            Entry::BiosStatus {
+                name: "GB BIOS on SD",
+                bios: Bios::Dmg,
+            },
+            Entry::BiosStatus {
+                name: "GBC BIOS on SD",
+                bios: Bios::Cgb,
+            },
+            Entry::Checkbox {
                 name: "Enable GB mode",
                 key: &keys::GB_IS_DMG,
             },
@@ -106,6 +123,14 @@ mod settings {
     pub static PAGE_CORE_GBA: Page = Page {
         name: "Core: GBA",
         entries: &[
+            Entry::Checkbox {
+                name: "Use SD BIOS (off: built-in)",
+                key: &keys::GBA_USE_SD_BIOS,
+            },
+            Entry::BiosStatus {
+                name: "GBA BIOS on SD",
+                bios: Bios::Gba,
+            },
             // Entry::Checkbox {
             //     name: "Skip Boot Animation",
             //     key: &keys::GBA_SKIP_BOOT_ANIM,
@@ -215,6 +240,7 @@ impl UiState {
 
 pub struct SettingsModel {
     page: &'static settings::Page,
+    bios_status: Vec<(usize, &'static str)>,
     notify: ModelNotify,
 }
 
@@ -235,6 +261,15 @@ impl Model for SettingsModel {
                     bool_value: key.get().unwrap(),
                     ..SettingValue::default()
                 },
+                ..Default::default()
+            },
+            settings::Entry::BiosStatus { name, .. } => SettingEntry {
+                name: format!(
+                    "{name}: {}",
+                    self.bios_status.iter().find(|(index, _)| *index == row)?.1
+                )
+                .into(),
+                r#type: SettingType::Info,
                 ..Default::default()
             },
             settings::Entry::List { name, key, choices } => SettingEntry {
@@ -298,6 +333,17 @@ impl SettingsModel {
     fn new(page: &'static settings::Page) -> Self {
         SettingsModel {
             page,
+            // Probe once on page entry, never on the rendering path. Re-entering
+            // the page refreshes detection after SD-card file changes.
+            bios_status: page
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| match entry {
+                    settings::Entry::BiosStatus { bios, .. } => Some((index, bios.sd_status())),
+                    _ => None,
+                })
+                .collect(),
             notify: ModelNotify::default(),
         }
     }
@@ -311,6 +357,7 @@ impl SettingsModel {
 
         match entry {
             settings::Entry::Checkbox { key, .. } => key.set(&value.bool_value),
+            settings::Entry::BiosStatus { .. } => return SettingsAction::None,
             settings::Entry::List { key, .. } => key.set(&value.int_value),
             settings::Entry::SystemDatetime { .. } => {
                 let dt = convert_settings_datetime(&value.datetime_value).unwrap();

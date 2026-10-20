@@ -9,13 +9,20 @@ cargo +nightly test --manifest-path firmware/handheld/tests/core-host/Cargo.toml
 python3 firmware/handheld/tests/test_make_uf2.py
 ```
 
-The 23 Rust tests cover the ten directory cases and thirteen lifecycle/I/O cases:
+The 26 Rust tests cover ten directory cases, thirteen lifecycle/I/O cases and
+three BIOS selection cases:
 late cancellation after launch, cancellation cleanup, disappeared files, queued
 selection after cancellation, duplicate launch, a selected ROM disappearing
 before open, command read/write faults, exact chunked transfer, data transfer
 failure, save-memory initialization failure, consumer failure and empty read
 buffers, and filtered directory/error delivery. Device faults must be returned
 without a panic or a false success, and scratch memory must be released.
+
+BIOS checks use real temporary files to verify SD/bundled selection for all four
+filenames, disabling and re-enabling without deleting files, missing files,
+wrong sizes, directory paths, read errors, independent GB/GBA switches and the
+GBA fast-boot filename. The real KVS key definitions use an in-memory store on the
+host; NVS persistence still needs a device check.
 
 The eight lifecycle regressions initially failed on rebased commit `a4a9be3` and
 passed after the review fixes. The UF2 tests independently decode every block,
