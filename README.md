@@ -56,23 +56,26 @@ At a high level, this means that you can copy, share, and modify the source code
 ## 核心文件列表编译选项
 
 已适配上游 `handheld` 的 CoreManager 架构；各核心按自身配置筛选文件，
-并保留各文件槽上次选择的路径。源码版本为 `1.0.2-fusionpixel.1`。
+并保留各文件槽上次选择的路径。源码版本为 `1.0.2-fusionpixel.2`。
 
 在 `firmware/handheld` 中编译（下面以 rev4 为例）：
 
 ```sh
-# 默认：上下选择；左右键或 L/R 翻页，也可选择 Previous/Next page 条目
+# 默认：上下选择；左右键或 L/R 翻页，每页 10 个文件／目录
 ./build_fusion_pixel_full.sh --release --features=rev4
 
 # 滚动：上下选择，到当前批次边界时自动加载前／后一批
 ./build_fusion_pixel_full.sh --release --features=rev4,rom-list-scroll
 ```
 
-滚动模式不显示翻页条目，列表首尾停止；跨批次会短暂显示 Loading。
+两种模式都不显示 Previous/Next page 条目。翻页模式每页最多 10 个文件／目录，
+并为子目录的“..”返回项预留一行，可在一屏内完整显示；首尾页不能继续向外翻页。
+滚动模式在列表首尾停止；跨批次会短暂显示 Loading。
 两种模式都支持 A 打开、B 返回上级目录及恢复上次选中的文件。
 
-两种模式共用有界目录扫描：每批最多 32 个文件／目录，扫描堆最多保留
-33 个候选；UI 最多 35 行（含上级目录及翻页条目）。加载前清空旧模型，
+两种模式共用有界目录扫描：翻页模式每页最多 10 项，扫描堆最多保留 11 个候选，
+UI 最多 11 行（含上级目录）；滚动模式每批最多 32 项，扫描堆最多保留 33 个候选，
+UI 最多 33 行。加载前清空旧模型，
 不缓存或追加历史批次，因此列表内存不会随目录条目总数增长。
 文件名保持完整用于打开文件，显示宽度限制为 250px；全量中文字库覆盖文本
 仍只在编译时使用。此约束避免全目录加载导致的 OOM；设备整体剩余堆、
@@ -98,6 +101,8 @@ python3 firmware/handheld/make_uf2.py path/to/application.bin path/to/output.uf2
 `gamebub-cjk-rev4-scroll.uf2` 为连续滚动版；
 `gamebub-cjk-rev4.uf2` 与分页版相同。构建来源和校验值见
 `firmware/handheld/uf2-build-info.json` 与根目录 `SHA256SUMS`。
+本次 `v1.0.2-fusionpixel.2-paged` Release 单独发布翻页版；
+仓库中的滚动版固件仍为 `1.0.2-fusionpixel.1`。
 两种 UF2 仅写入主程序和系统数据分区，不包含 NVS 或 DFU 分区。
 
 核心生命周期及故障模拟见 [Core host checks](firmware/handheld/tests/core-host/README.md)。

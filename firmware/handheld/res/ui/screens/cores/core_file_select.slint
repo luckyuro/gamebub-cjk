@@ -48,7 +48,7 @@ export component CoreFileSelect {
         }
         VerticalLayout {
             height: 100%;
-            spacing: 2px;
+            spacing: Backend.core-file-select-scroll ? 2px : 1px;
 
             Text {
                 text: Backend.core-file-select-path;

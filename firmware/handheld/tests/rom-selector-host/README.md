@@ -12,6 +12,8 @@ cargo +nightly run --manifest-path firmware/handheld/tests/rom-selector-host/Car
 cargo +nightly run --manifest-path firmware/handheld/tests/rom-selector-host/Cargo.toml --target aarch64-apple-darwin --features=rom-list-scroll
 rustc +nightly --edition=2021 --test firmware/handheld/src/rom_list.rs -o /tmp/rom-list-tests
 /tmp/rom-list-tests
+rustc +nightly --edition=2021 --cfg 'feature="rom-list-scroll"' --test firmware/handheld/src/rom_list.rs -o /tmp/rom-list-scroll-tests
+/tmp/rom-list-scroll-tests
 ```
 
 To check the actual bit-packed firmware font path, first prepare the Slint patch
@@ -26,7 +28,9 @@ the firmware's exact coverage-text removal and bitmap packing code.
 Checks cover B preserving the in-flight flag, blocked inputs not queueing more
 work, immediate release of old model rows, 300 batches of 255-character filenames,
 backward selection of the last file, cancellation of the selection timer on error,
-navigation of an empty directory, Home cancellation during scans/timers, ignored
+navigation of an empty directory, ten-entry button pages with a separate parent row,
+arrow/shoulder paging at the first and final pages, single-entry final pages,
+Home cancellation during scans/timers, ignored
 late replies, launch input gating, and saved-file/directory navigation using real
 temporary files. Scroll mode sends approximately 9,600
 Down key events and renders between them. The allocator records live requested
@@ -66,3 +70,15 @@ Set `GAMEBUB_SIM_SCREENSHOT=/absolute/path/screen.ppm` to capture the first
 The review also fixed initial focus when a page arrives before the file selector
 component is created. CoreManager fault simulation is documented in
 [core-host](../core-host/README.md).
+
+Button paging also captures a sibling `screen.last.ppm` frame with the last entry
+selected, to check that all ten entries and the parent row fit without scrolling.
+
+## Paging update verification (2026-10-20)
+
+The ten-entry paging build and 32-entry scrolling build each passed all ten
+directory tests and 300 UI batches. Paging also passed arrow/shoulder navigation,
+first/final-page limits, a one-entry final page, and parent-row counts. Both modes
+had zero live allocation growth after warm-up. Paging retained 15112 bytes during
+the lazy scan and peaked at 18796 bytes for both 1,000 and 100,000 filenames.
+The 360×240 first/last selection renders show all ten entries and the parent row.

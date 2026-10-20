@@ -6,8 +6,11 @@ use std::{
 };
 
 /// Bound the amount of directory data retained while building the ROM selector model.
-// Shared by button paging and scrolling; never append pages to the UI model.
-pub const PAGE_SIZE: usize = 32;
+pub const PAGE_SIZE: usize = if cfg!(feature = "rom-list-scroll") {
+    32
+} else {
+    10
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RomListEntry {
@@ -329,7 +332,7 @@ mod tests {
         let all_files = files(PAGE_SIZE * 3);
         let saved = all_files
             .iter()
-            .find(|entry| entry.name == format!("file-{:04}.gba", PAGE_SIZE + 22))
+            .find(|entry| entry.name == format!("file-{:04}.gba", PAGE_SIZE + PAGE_SIZE / 2))
             .unwrap()
             .clone();
         let page = select_entries(

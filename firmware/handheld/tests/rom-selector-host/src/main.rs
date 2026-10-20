@@ -171,9 +171,15 @@ fn frame(window: &MinimalSoftwareWindow) {
         r.render_by_line(&mut Lines([Rgb565Pixel::default(); 360]));
     });
 }
-fn snapshot(window: &MinimalSoftwareWindow) {
+fn snapshot(window: &MinimalSoftwareWindow, suffix: &str) {
     let Some(path) = std::env::var_os("GAMEBUB_SIM_SCREENSHOT") else {
         return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let path = if suffix.is_empty() {
+        path
+    } else {
+        path.with_extension(format!("{suffix}.ppm"))
     };
     window.request_redraw();
     window.draw_if_needed(|renderer| {
@@ -278,7 +284,67 @@ fn main() {
         Some(worker::Message::CoreFileList { .. })
     ));
     finish(&state, &window, 0, 10_000, rom_list::RomListFocus::First);
-    snapshot(&window);
+    assert_eq!(
+        backend.get_core_file_select_list().row_count(),
+        rom_list::PAGE_SIZE + 1
+    );
+    assert_eq!(
+        backend.get_core_file_select_list().row_data(0).unwrap().name,
+        ".."
+    );
+    snapshot(&window, "");
+
+    if !cfg!(feature = "rom-list-scroll") {
+        assert_eq!(rom_list::PAGE_SIZE, 10);
+        let paging_keys: [(slint::SharedString, slint::SharedString); 2] = [
+            (slint::platform::Key::RightArrow.into(), "l".into()),
+            ("r".into(), slint::platform::Key::LeftArrow.into()),
+        ];
+        for (next_key, previous_key) in paging_keys {
+            key(&window, previous_key.clone());
+            assert!(worker::take().is_none());
+            key(&window, next_key.clone());
+            assert!(matches!(
+                worker::take(),
+                Some(worker::Message::CoreFileList {
+                    page: rom_list::RomListPageRequest::After(cursor),
+                    ..
+                }) if cursor.name.starts_with("000009")
+            ));
+            finish(
+                &state,
+                &window,
+                rom_list::PAGE_SIZE,
+                rom_list::PAGE_SIZE + 1,
+                rom_list::RomListFocus::First,
+            );
+            assert_eq!(backend.get_core_file_select_list().row_count(), 2);
+            assert_eq!(backend.get_core_file_select_index(), 1);
+            for next in [slint::platform::Key::RightArrow.into(), "r".into()] {
+                key(&window, next);
+                assert!(worker::take().is_none());
+            }
+            key(&window, previous_key);
+            assert!(matches!(
+                worker::take(),
+                Some(worker::Message::CoreFileList {
+                    page: rom_list::RomListPageRequest::Before(cursor),
+                    ..
+                }) if cursor.name.starts_with("000010")
+            ));
+            finish(
+                &state,
+                &window,
+                0,
+                rom_list::PAGE_SIZE + 1,
+                rom_list::RomListFocus::Last,
+            );
+            assert_eq!(backend.get_core_file_select_list().row_count(), 11);
+            assert_eq!(backend.get_core_file_select_index(), 10);
+            snapshot(&window, "last");
+            finish(&state, &window, 0, 10_000, rom_list::RomListFocus::First);
+        }
+    }
 
     // B must keep loading true and suppress further actions until the response.
     key(&window, "b".into());
@@ -316,7 +382,9 @@ fn main() {
             worker::Message::CoreFileList {
                 page: rom_list::RomListPageRequest::After(cursor),
                 ..
-            } => assert!(cursor.name.starts_with(&format!("{:06}", batch * 32 + 31))),
+            } => assert!(cursor
+                .name
+                .starts_with(&format!("{:06}", (batch + 1) * rom_list::PAGE_SIZE - 1))),
             other => panic!("unexpected request: {other:?}"),
         }
         assert!(backend.get_core_file_select_is_loading());
@@ -326,9 +394,13 @@ fn main() {
         finish(
             &state,
             &window,
-            (batch + 1) * 32,
+            (batch + 1) * rom_list::PAGE_SIZE,
             10_000,
             rom_list::RomListFocus::First,
+        );
+        assert_eq!(
+            backend.get_core_file_select_list().row_count(),
+            rom_list::PAGE_SIZE
         );
         let live = LIVE.load(Ordering::Relaxed);
         if batch == 10 {
@@ -376,13 +448,15 @@ fn main() {
     finish(
         &state,
         &window,
-        299 * 32,
+        299 * rom_list::PAGE_SIZE,
         10_000,
         rom_list::RomListFocus::Last,
     );
     key(&window, "a".into());
     assert!(
-        matches!(worker::take(), Some(worker::Message::CoreFileSelected(path)) if path.file_name().unwrap().to_str().unwrap().starts_with("009599"))
+        matches!(worker::take(), Some(worker::Message::CoreFileSelected(path))
+            if path.file_name().unwrap().to_str().unwrap()
+                .starts_with(&format!("{:06}", 300 * rom_list::PAGE_SIZE - 1)))
     );
     // An error must cancel the pending selection timer.
     root.invoke_set_screen(ui::slint::ScreenId::Cores);
@@ -390,7 +464,7 @@ fn main() {
     worker::take().unwrap();
     state
         .borrow_mut()
-        .cores_file_select_list(page(0, 32, rom_list::RomListFocus::First));
+        .cores_file_select_list(page(0, rom_list::PAGE_SIZE, rom_list::RomListFocus::First));
     state
         .borrow_mut()
         .cores_file_select_set_error("test read error".into());
@@ -432,7 +506,7 @@ fn main() {
     worker::take().unwrap();
     state
         .borrow_mut()
-        .cores_file_select_list(page(0, 32, rom_list::RomListFocus::First));
+        .cores_file_select_list(page(0, rom_list::PAGE_SIZE, rom_list::RomListFocus::First));
     backend.set_core_subscreen(ui::slint::CoreSubscreen::List);
     backend.invoke_core_file_select_cancel();
     assert!(matches!(

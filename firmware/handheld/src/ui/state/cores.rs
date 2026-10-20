@@ -103,22 +103,8 @@ impl UiState {
             }
             let list = backend.get_core_file_select_list();
             if let Some(data) = list.row_data(index as usize) {
-                match data.icon {
-                    FileIcon::PreviousPage => {
-                        if let Some(cursor) = state.core_file_select_page_first.clone() {
-                            state.cores_file_select_load_page(RomListPageRequest::Before(cursor));
-                        }
-                    }
-                    FileIcon::NextPage => {
-                        if let Some(cursor) = state.core_file_select_page_last.clone() {
-                            state.cores_file_select_load_page(RomListPageRequest::After(cursor));
-                        }
-                    }
-                    _ => {
-                        let path = state.core_file_select_directory.join(data.name.as_str());
-                        state.cores_handle_file_select_selected(path, data.name.as_str());
-                    }
-                }
+                let path = state.core_file_select_directory.join(data.name.as_str());
+                state.cores_handle_file_select_selected(path, data.name.as_str());
             }
         });
 
@@ -254,12 +240,9 @@ impl UiState {
         self.core_file_select_page_first = entries.first().cloned();
         self.core_file_select_page_last = entries.last().cloned();
         let scroll = cfg!(feature = "rom-list-scroll");
-        let mut files = Vec::with_capacity(entries.len() + 3);
+        let mut files = Vec::with_capacity(entries.len() + 1);
         if self.core_file_select_directory != Path::new(BASE_DIR) && (!scroll || !has_previous) {
             files.push(("..".to_string(), FileIcon::Folder));
-        }
-        if has_previous && !scroll {
-            files.push(("Previous page".to_string(), FileIcon::PreviousPage));
         }
         let first = files.len();
         let count = entries.len();
@@ -272,9 +255,6 @@ impl UiState {
                     FileIcon::Blank
                 },
             ));
-        }
-        if has_next && !scroll {
-            files.push(("Next page".to_string(), FileIcon::NextPage));
         }
         let first_entry = (count > 0).then_some(first);
         let selected = match focus {

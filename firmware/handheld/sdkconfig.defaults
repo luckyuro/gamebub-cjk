@@ -28,7 +28,7 @@ CONFIG_FLASHMODE_QIO=y
 # Keep custom builds distinguishable from the official v1.0.2 image in the
 # ESP-IDF application descriptor as well as in the Rust/UI version string.
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="1.0.2-fusionpixel.1"
+CONFIG_APP_PROJECT_VER="1.0.2-fusionpixel.2"
 
 # Enable USB MSC and CDC support
 CONFIG_TINYUSB=y
