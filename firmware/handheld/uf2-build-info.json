@@ -1,8 +1,8 @@
 {
-  "version": "1.0.2-fusionpixel.1",
-  "source_commit": "cfce527650e360d027e687694aa739b9e89ef981",
+  "version": "1.0.2-fusionpixel.2",
+  "source_commit": "c9ad5d67968e2ddd7ef84ea2ef4e246c146dbf0e",
   "upstream_commit": "ce607713c7dcd87fe42d5c0de5d4be040e61a47f",
-  "built_at": "2026-10-19T13:36:32.176343+00:00",
+  "built_at": "2026-10-20T07:53:46.664293+00:00",
   "target": "xtensa-esp32s3-espidf",
   "profile": "release",
   "hardware_revision": 4,
@@ -23,16 +23,18 @@
     "flash_end_exclusive": "0x800000"
   },
   "verification": {
-    "core_and_directory_tests_passed": 23,
     "uf2_unit_tests_passed": 2,
     "production_dfu_parser_passed": true,
     "partition_payload_round_trip_passed": true,
     "esp_image_checksum_and_sha256_passed": true,
     "ui_batches_per_mode": 300,
     "scroll_down_key_events": 9600,
-    "paged_live_bytes_growth_after_warmup": 32,
+    "paged_live_bytes_growth_after_warmup": 0,
     "scroll_live_bytes_growth_after_warmup": 0,
-    "physical_hardware_tested": false
+    "physical_hardware_tested": false,
+    "directory_tests_per_mode_passed": 10,
+    "paged_arrow_and_shoulder_boundary_checks_passed": true,
+    "paged_first_and_last_row_visual_checks_passed": true
   },
   "artifacts": [
     {
@@ -42,10 +44,17 @@
       ],
       "file": "gamebub-cjk-rev4-paged.uf2",
       "bytes": 11542528,
-      "sha256": "922aa4e4954eb4c3ce328c673fae7f23d1c087da5dee3f8f982320e69a6f25a9",
-      "application_bytes": 3670128,
-      "application_sha256": "2115e736c1e30086b6b8c6d2b41cb20da705ae9fe6a98adf97720e9c6878cfc4",
-      "elf_sha256": "858bc3223113af94751d491e0ac6d450d3d392b3723487428c3ce3d287a881aa"
+      "sha256": "7f2aa10c73a9298be94ef633d63304b62aca6617d775557ee52a87ea69c10104",
+      "application_bytes": 3670336,
+      "application_sha256": "8a88a1f7506315ea5cf399f275abb3dfd3a0b1ddfc3b2c8a8ac90a2c73315e93",
+      "elf_sha256": "98417ea421424386f1610fff979d25ef747b5d5109527b5aae08a0cec6c99788",
+      "source_commit": "c9ad5d67968e2ddd7ef84ea2ef4e246c146dbf0e",
+      "source_dirty": false,
+      "built_at": "2026-10-20T07:53:46.664293+00:00",
+      "entries_per_page": 10,
+      "max_ui_rows_including_parent": 11,
+      "page_navigation_rows": false,
+      "version": "1.0.2-fusionpixel.2"
     },
     {
       "mode": "scroll",
@@ -58,11 +67,16 @@
       "sha256": "3d7f658ed5e791aa301f423b14d94d08cf2f3a2e61428b3cead025630cd41a55",
       "application_bytes": 3670048,
       "application_sha256": "4baf72bea93fec18bdd7573dd9061bf11ffb277373379047aae7f120c0989636",
-      "elf_sha256": "c576184f78e7f65972188ef50f354b481f9b85f0c4a4141e3f491a3dab70dd7c"
+      "elf_sha256": "c576184f78e7f65972188ef50f354b481f9b85f0c4a4141e3f491a3dab70dd7c",
+      "source_commit": "cfce527650e360d027e687694aa739b9e89ef981",
+      "source_dirty": false,
+      "built_at": "2026-10-19T13:36:32.176343+00:00",
+      "version": "1.0.2-fusionpixel.1"
     }
   ],
   "default_alias": {
     "file": "gamebub-cjk-rev4.uf2",
     "mode": "paged"
-  }
+  },
+  "source_dirty": false
 }
